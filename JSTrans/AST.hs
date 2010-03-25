@@ -21,6 +21,7 @@ data PropertyName = PNIdentifier String
                   | PNLiteral Literal
                     deriving (Eq,Show)
 data AccessorKind = Getter | Setter deriving (Eq,Show)
+data ComprehensionKind = CompForIn | CompForEach deriving (Eq,Show)
 data Expr = Binary Operator Expr Expr
           | Prefix Operator Expr
           | Postfix Operator Expr
@@ -29,6 +30,9 @@ data Expr = Binary Operator Expr Expr
           | Index Expr Expr
           | FuncCall Expr [Expr]
           | ArrayLiteral [Maybe Expr]
+          | ArrayComprehension Expr
+              [(ComprehensionKind,String,Expr) {- for / for each -}]
+              (Maybe Expr {- if -})
           | ObjectLiteral [(PropertyName,Either Expr (AccessorKind,Function))]
           | Let [(String,Maybe Expr)] Expr
           | FunctionExpression Bool{-isExpressionClosure-} Function
@@ -138,6 +142,12 @@ getDefaultTransformer v
     myExpr (Index x y) = liftM2 Index (expr x) (expr y)
     myExpr (FuncCall fn args) = liftM2 FuncCall (expr fn) (mapM expr args)
     myExpr (ArrayLiteral elems) = liftM ArrayLiteral (mapM (mmap expr) elems)
+    myExpr (ArrayComprehension x f i)
+        = do{ x' <- expr x
+            ; f' <- mapM (\(k,n,o) -> do{ o' <- expr o ; return (k,n,o') }) f
+            ; i' <- mmap expr i
+            ; return $ ArrayComprehension x' f' i'
+            }
     myExpr (ObjectLiteral elems) = liftM ObjectLiteral (mapM elem elems)
       where 
         elem (pname,Left value) = do{ value' <- expr value
@@ -228,6 +238,8 @@ getDefaultVisitor v
     myExpr (Index x y) = expr x >> expr y
     myExpr (FuncCall fn args) = expr fn >> mapM_ expr args
     myExpr (ArrayLiteral elems) = mapM_ (mmap expr) elems
+    myExpr (ArrayComprehension x f i)
+        = expr x >> mapM_ (\(_,_,o) -> expr o) f >> mmap_ expr i
     myExpr (ObjectLiteral elems) = mapM_ elem elems
       where 
         elem (_,Left value) = expr value
@@ -308,6 +320,19 @@ scanUsedVar funcBody = fst $ flip execState ([],[]) $ mapM_ (visitSourceElem myV
         = do{ (usedVariables,declaredVariables) <- get
             ; when (name `notElem` declaredVariables)
                 (put (usedVariables `union` [name],declaredVariables))
+            }
+    myExpr (ArrayComprehension x f i)
+        = do{ let compVars = map (\(_,n,_) -> n) f
+            ; (usedVariables,declaredVariables) <- get
+            ; let declaredVariables'
+                      = declaredVariables
+                        `union` compVars
+            ; put (usedVariables,declaredVariables')
+            ; myExpr x
+            ; mapM_ myExpr $ map (\(_,_,x) -> x) f
+            ; maybe (return ()) myExpr i
+            ; (usedVariables',_) <- get
+            ; put (usedVariables',declaredVariables)
             }
     myExpr v = visitExpr defaultVisitor v
     myFunction fn

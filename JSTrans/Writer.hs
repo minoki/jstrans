@@ -62,6 +62,16 @@ primaryExpr (ArrayLiteral elems) = squares $ sepBy (map element elems) comma
     element Nothing = id
     element (Just x) = assignmentExpression x
 
+primaryExpr (ArrayComprehension x f i) = squares $ expr x . (many $ map compFor f) . option' compIf i
+  where
+    compFor (k,n,e)
+        = ident "for"
+          . (if k == CompForIn
+              then id
+              else ident "each")
+          . (parens $ ident n . ident "in" . expr e)
+    compIf e = ident "if" . (parens $ expr e)
+
 primaryExpr (ObjectLiteral elems) = braces $ sepBy (map element elems) comma
   where
     element (name,Left e) = propertyName name

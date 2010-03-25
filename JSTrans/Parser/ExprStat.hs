@@ -51,9 +51,34 @@ literal = do{ reserved "null" ; return NullLiteral }
       <|> regExpLiteral
 
 
-arrayLiteral = fmap ArrayLiteral $ squares $ sepBy element comma
+arrayLiteral
+    = squares
+      $ do{ elements <- sepBy element comma
+          ; case elements of
+              [Just x] -> arrayComprehension x
+                      <|> (return $ ArrayLiteral elements)
+              _ -> return $ ArrayLiteral elements
+          }
   where
     element = option' assignmentExpr
+    arrayComprehension x = do{ cf <- many1 compFor
+                             ; ci <- fmap Just compIf
+                                 <|> return Nothing
+                             ; return $ ArrayComprehension x cf ci
+                             }
+    compFor = do{ reserved "for"
+                ; kind <- (reserved "each" >> return CompForEach)
+                      <|> return CompForIn
+                ; parens
+                  $ do{ n <- identifierExcludingEvalOrArguments
+                      ; reserved "in"
+                      ; e <- expr
+                      ; return $ (kind,n,e)
+                      }
+                }
+    compIf = do{ reserved "if"
+               ; parens expr
+               }
 
 objectLiteral = fmap ObjectLiteral $ braces $ sepEndBy propertyAssignment comma
   where
