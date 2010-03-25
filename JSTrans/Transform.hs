@@ -231,12 +231,15 @@ getTransformer options = myTransformer
 
     myFunction :: Function -> TransformerState Function
     myFunction fn = do{ prevAliasForThis <- gets aliasForThis
-                      ; prevAliasForArguments <- gets aliasForThis
+                      ; prevAliasForArguments <- gets aliasForArguments
+                      ; prevIsInsideImplicitlyCreatedFunction
+                          <- gets isInsideImplicitlyCreatedFunction
                       ; modify (\s -> s { aliasForThis = Nothing
                                         , aliasForArguments = Nothing
+                                        , isInsideImplicitlyCreatedFunction = False
                                         })
                       ; fn' <- transformFunction defaultTransformer fn
-                      ; aliasForThis' <- gets aliasForThis 
+                      ; aliasForThis' <- gets aliasForThis
                       ; aliasForArguments' <- gets aliasForArguments
                       ; let internalVars
                                 = (maybe [] (\s -> [(s,Just This)]) aliasForThis')
@@ -251,6 +254,8 @@ getTransformer options = myTransformer
                                                 : functionBody fn')
                       ; modify (\s -> s { aliasForThis = prevAliasForThis
                                         , aliasForArguments = prevAliasForArguments
+                                        , isInsideImplicitlyCreatedFunction
+                                            = prevIsInsideImplicitlyCreatedFunction
                                         })
                       ; return fn''
                       }
