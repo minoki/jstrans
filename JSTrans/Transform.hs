@@ -23,19 +23,31 @@ data TransformOptions = TransformOptions
 
 identifierToStringLiteral = StringLiteral . show
 
-type TransformerState = State Int
+data TransformerData
+    = TransformerData
+      { genSymCounter :: Int
+      , aliasForThis :: Maybe String
+      , aliasForArguments :: Maybe String
+      , isInsideImplicitlyCreatedFunction :: Bool
+      }
+type TransformerState = State TransformerData
 
 genSym :: TransformerState String
-genSym = do{ n <- get
-           ; put (n+1)
+genSym = do{ n <- gets genSymCounter
+           ; modify (\s -> s {genSymCounter = n+1})
            ; return ('$':show n)
            }
 
 transformProgram :: TransformOptions -> [SourceElement] -> [SourceElement]
-transformProgram options s = evalState (mapM (transformSourceElem transformer) s) initialN
+transformProgram options s = evalState (mapM (transformSourceElem transformer) s) initialState
   where
     transformer = getTransformer options
     initialN = 1+scanInternalIdentifierUse s
+    initialState = TransformerData { genSymCounter = initialN
+                                   , aliasForThis = Nothing
+                                   , aliasForArguments = Nothing
+                                   , isInsideImplicitlyCreatedFunction = False
+                                   }
 
 
 transformAll = TransformOptions
@@ -64,11 +76,73 @@ getTransformer options = myTransformer
                              }
     defaultTransformer = getDefaultTransformer myTransformer
     myExpr :: Expr -> TransformerState Expr
+    myExpr v@(Variable "arguments")
+        = do{ f <- gets isInsideImplicitlyCreatedFunction
+            ; if f
+               then do{ w <- gets aliasForArguments
+                      ; case w of
+                          Just name -> return $ Variable name
+                          Nothing ->
+                              do{ name <- genSym
+                                ; modify (\s -> s {aliasForArguments = Just name})
+                                ; return $ Variable name
+                                }
+                      }
+               else return v
+            }
+    myExpr v@This
+        = do{ f <- gets isInsideImplicitlyCreatedFunction
+            ; if f
+               then do{ w <- gets aliasForThis
+                      ; case w of
+                          Just name -> return $ Variable name
+                          Nothing ->
+                              do{ name <- genSym
+                                ; modify (\s -> s {aliasForThis = Just name})
+                                ; return $ Variable name
+                                }
+                      }
+               else return v
+            }
     myExpr (Field x name)
         | transformReservedNameAsIdentifier options
           && name `elem` reservedNames
         = do{ x' <- myExpr x
             ; return $ Index x' $ Literal $ identifierToStringLiteral name
+            }
+    myExpr (ArrayComprehension x f i)
+        | transformArrayComprehension options
+        = do{ arrayName <- genSym
+            ; let arrayVar = Variable arrayName
+            ; prevIsInsideImplicitlyCreatedFunction
+                <- gets isInsideImplicitlyCreatedFunction
+            ; modify (\s -> s {isInsideImplicitlyCreatedFunction = True})
+            ; let compFor ((kind,varName,objExpr):rest)
+                      = do{ objExpr' <- myExpr objExpr
+                          ; rest' <- compFor rest
+                          ; return
+                            $ (if kind == CompForIn then ForIn else ForEach)
+                                  (ExpressionStatement $ Variable varName) objExpr' rest'
+                          }
+                  compFor [] = do{ x' <- myExpr x
+                                 ; let p = ExpressionStatement
+                                           $ FuncCall (Field arrayVar "push") [x']
+                                 ; case i of
+                                     Just g -> do{ g' <- myExpr g
+                                                 ; return $ If g' p Nothing }
+                                     Nothing -> return p
+                                 }
+            ; f' <- compFor f
+            ; modify (\s -> s {isInsideImplicitlyCreatedFunction
+                                   = prevIsInsideImplicitlyCreatedFunction})
+            ; let body = map Statement
+                         [VarDef VariableDefinition
+                                     $ (arrayName,Just $ New (Variable "Array") [])
+                                           :(map (\(_,n,_) -> (n,Nothing)) f)
+                         ,f'
+                         ,Return (Just arrayVar)
+                         ]
+            ; return $ FuncCall (FunctionExpression False $ makeFunction Nothing [] body) []
             }
     myExpr (ObjectLiteral elems)
         | transformReservedNameAsIdentifier options
@@ -135,7 +209,30 @@ getTransformer options = myTransformer
     myFuncDecl name x = transformFuncDecl defaultTransformer name x
 
     myFunction :: Function -> TransformerState Function
-    myFunction x = transformFunction defaultTransformer x
+    myFunction fn = do{ prevAliasForThis <- gets aliasForThis
+                      ; prevAliasForArguments <- gets aliasForThis
+                      ; modify (\s -> s { aliasForThis = Nothing
+                                        , aliasForArguments = Nothing
+                                        })
+                      ; fn' <- transformFunction defaultTransformer fn
+                      ; aliasForThis' <- gets aliasForThis 
+                      ; aliasForArguments' <- gets aliasForArguments
+                      ; let internalVars
+                                = (maybe [] (\s -> [(s,Just This)]) aliasForThis')
+                                  ++ (maybe [] (\s -> [(s,Just (Variable "arguments"))])
+                                            aliasForArguments')
+                      ; let fn'' = if null internalVars
+                                    then fn'
+                                    else makeFunction
+                                             (functionName fn')
+                                             (functionArguments fn')
+                                             ((Statement $ VarDef VariableDefinition internalVars)
+                                                : functionBody fn')
+                      ; modify (\s -> s { aliasForThis = prevAliasForThis
+                                        , aliasForArguments = prevAliasForArguments
+                                        })
+                      ; return fn''
+                      }
 
 
 scanInternalIdentifierUse :: [SourceElement] -> Int
