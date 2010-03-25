@@ -4,7 +4,7 @@ import JSTrans.Parser.Token (reservedNames)
 import Control.Monad.State
 import Char (isDigit)
 import Numeric (readDec)
-import Maybe (maybeToList)
+import Maybe (maybeToList,isJust,isNothing,fromJust)
 import List (union)
 
 data TransformOptions = TransformOptions
@@ -164,6 +164,27 @@ getTransformer options = myTransformer
     myExpr (FunctionExpression True fn)
         | transformExpressionClosure options
         = myExpr (FunctionExpression False fn)
+    myExpr (Let vars e)
+        | transformLetExpression options
+        = do{ let varsWithInitializer = filter (isJust . snd) vars
+                  varsWithNoInitializer = filter (isNothing . snd) vars
+            ; varsWithInitializer' <- mapM (\(n,Just e) -> do { e' <- myExpr e
+                                                              ; return (n,Just e')
+                                                              }) varsWithInitializer
+            ; prevIsInsideImplicitlyCreatedFunction
+                <- gets isInsideImplicitlyCreatedFunction
+            ; modify (\s -> s {isInsideImplicitlyCreatedFunction = True})
+            ; e' <- myExpr e
+            ; modify (\s -> s {isInsideImplicitlyCreatedFunction
+                                   = prevIsInsideImplicitlyCreatedFunction})
+            ; let body = [Statement $ Return (Just e')]
+            ; return $ FuncCall
+                         (FunctionExpression False
+                            $ makeFunction Nothing
+                                  (map fst $ varsWithInitializer'++varsWithNoInitializer)
+                                  body)
+                         (map (fromJust . snd) varsWithInitializer')
+            }
     myExpr x = transformExpr defaultTransformer x
 
     myStat :: Statement -> TransformerState Statement
