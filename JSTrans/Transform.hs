@@ -11,9 +11,9 @@ data TransformOptions = TransformOptions
   { transformConditionalCatch :: Bool
   , transformForEach :: Bool
   , transformGenerator :: Bool -- not parsed
-  , transformArrayComprehension :: Bool -- not parsed
-  , transformLetExpression :: Bool -- not parsed
-  , transformLetStatement :: Bool -- not parsed
+  , transformArrayComprehension :: Bool
+  , transformLetExpression :: Bool
+  , transformLetStatement :: Bool -- not implemented
   , transformLetDefinition :: Bool -- not implemented
   , transformDestructingAssignment :: Bool -- not parsed
   , transformReservedNameAsIdentifier :: Bool
