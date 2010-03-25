@@ -91,6 +91,10 @@ memberExpr (FunctionExpression _ fn)
     = ident "function"
       . option' ident (functionName fn)
       . functionParameterAndBody fn
+memberExpr (Let vars body)
+    = ident "let"
+      . (parens $ sepBy (map varDecl vars) comma)
+      . assignmentExpression body -- TODO: allowIn
 memberExpr (Index x y) = memberExpr x . squares (expr y)
 memberExpr (Field x name) = memberExpr x . char '.' . ident name
 memberExpr (New ctor args) = ident "new" . memberExpr ctor . arguments args

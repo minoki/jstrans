@@ -82,6 +82,7 @@ objectLiteral = fmap ObjectLiteral $ braces $ sepEndBy propertyAssignment comma
 
 memberExpr = suffix =<< (primaryExpr
                      <|> functionExpr
+                     <|> letExpr
                      <|> do{ reserved "new"
                            ; e <- memberExpr
                            ; a <- option [] arguments
@@ -96,6 +97,12 @@ memberExpr = suffix =<< (primaryExpr
                  ; suffix $ Field a n
                  }
            <|> return a
+
+letExpr = do{ reserved "let"
+            ; variables <- parens $ sepBy1 varDeclaration comma
+            ; body <- assignmentExprBase
+            ; return $ Let variables body
+            }
 
 callExpr = do{ f <- memberExpr
              ; do{ args <- arguments
