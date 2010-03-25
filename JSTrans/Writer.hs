@@ -159,7 +159,7 @@ block stats = braces $ many $ map stat stats
 varDecl (name,value) = ident name . option' (\e -> operator "=" . assignmentExpression e) value
 stat EmptyStat = semi
 stat (VarDef kind v) = definitionKind kind . sepBy (map varDecl v) comma . semi
-stat (LetStatement _ _) = undefined
+stat (LetStatement v b) = ident "let" . (parens $ sepBy (map varDecl v) comma) . block b
 stat (ExpressionStatement e)
     = let c = expr e
       in case c "" of

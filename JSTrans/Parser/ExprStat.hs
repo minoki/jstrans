@@ -251,9 +251,18 @@ varDeclarationNoIn = disallowIn varDeclarationBase
 definition :: Parser DefinitionKind
 definition = do{ reserved "var" ; return VariableDefinition }
          <|> do{ reserved "const" ; return ConstantDefinition }
-         <|> do{ reserved "let" ; return LetDefinition }
+         <|> do{ try (reserved "let" >> notFollowedBy (char '(')) ; return LetDefinition }
 
 emptyStatement = semi >> return EmptyStat
+letStatement = do{ reserved "let"
+                 ; variables <- parens $ sepBy1 varDeclaration comma
+                 ; do{ body <- block
+                     ; return $ LetStatement variables body
+                     }
+               <|> do{ body <- assignmentExpr
+                     ; return $ ExpressionStatement $ Let variables body
+                     }
+                 }
 expressionStatement
     = do{ try (do{ c <- reservedOp "{" <|> reserved "function"
                  ; unexpected (show c)
@@ -416,6 +425,7 @@ statement = fmap BlockStatement block
         <|> varStatement
         <|> emptyStatement
         <|> labelledStatement
+        <|> letStatement -- must be before expressionStatement
         <|> expressionStatement
         <|> ifStatement
         <|> iterationStatement
