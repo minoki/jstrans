@@ -28,7 +28,7 @@ statement :: Parser Statement
 sourceElement :: Parser SourceElement
 functionDeclaration :: Parser SourceElement
 functionBody :: Parser FunctionBody
-program :: Parser [SourceElement]
+program :: Parser Program
 
 
 ---
@@ -258,7 +258,7 @@ exprNoIn = disallowIn exprBase
 --- Statements
 ---
 
-block = braces $ many statement
+block = fmap Block $ braces $ many statement
 varStatement = do{ defKind <- definition
                  ; varDecls <- sepBy1 varDeclaration comma
                  ; autoSemi
@@ -483,16 +483,16 @@ functionExpr
         ; params <- parens $ sepBy identifierExcludingEvalOrArguments comma
         ; checkDuplicate params
         ; (isEC,body) <- (fmap (\x -> (False,x)) $ braces functionBody)
-                     <|> (fmap (\e -> (True,[Statement (Return (Just e))]))
+                     <|> (fmap (\e -> (True,FunctionBody [Statement (Return (Just e))]))
                                    $ assignmentExprBase) -- EXT: Expression Closure
         ; let fn = makeFunction Nothing params body
         ; return $ FunctionExpression isEC fn
         }
-functionBody = many sourceElement
+functionBody = fmap FunctionBody $ many sourceElement
 program = do{ whiteSpace
             ; x <- many sourceElement
             ; eof
-            ; return x
+            ; return $ Program x
             }
 
 checkDuplicate [] = return ()

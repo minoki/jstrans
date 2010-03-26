@@ -46,7 +46,7 @@ data DefinitionKind = VariableDefinition
                     | ConstantDefinition
                     | LetDefinition
                       deriving (Eq,Show)
-type Block = [Statement]
+newtype Block = Block [Statement] deriving (Eq,Show)
 data Statement = EmptyStat
                | VarDef DefinitionKind [(String,Maybe Expr)]
                | LetStatement [(String,Maybe Expr)] Block
@@ -74,10 +74,9 @@ data SwitchClause = CaseClause Expr [Statement]
                     deriving (Eq,Show)
 data SourceElement = Statement Statement
                    | FunctionDeclaration String Function
---                   | FunctionDeclaration String [String] FunctionBody
                      deriving (Eq,Show)
-type FunctionBody = [SourceElement]
-
+newtype FunctionBody = FunctionBody [SourceElement] deriving (Eq,Show)
+newtype Program = Program [SourceElement] deriving (Eq,Show)
 
 data Function
     = Function { functionName :: Maybe String
@@ -87,18 +86,7 @@ data Function
                , outerVariables :: [String] -- variables used in this function and not declared inside
 --               , innerFunctions :: [Function]
                } deriving (Eq,Show)
-makeFunction name args body
-    = Function { functionName = name
-               , functionArguments = args
-               , functionBody = body
-               , functionVariables = variables
-               , outerVariables
-                   = (scanUsedVar body)
-                     \\ (args `union` variables `union` ["arguments"]
-                         `union` maybeToList name)
-               }
-  where
-    variables = scanVarDecl body
+makeFunction :: Maybe String -> [String] -> FunctionBody -> Function
 
 data Monad m => Transformer m
     = Transformer { transformExpr :: Expr -> m Expr
@@ -106,11 +94,70 @@ data Monad m => Transformer m
                   , transformBlock :: Block -> m Block
                   , transformFuncDecl :: String -> Function -> m Function
                   , transformFunction :: Function -> m Function
+                  , transformProgram :: Program -> m Program
+                  }
+transformSourceElem :: Monad m => Transformer m -> SourceElement -> m SourceElement
+transformFunctionBody :: Monad m => Transformer m -> FunctionBody -> m FunctionBody
+
+data Monad m => Visitor m
+    = Visitor { visitExpr :: Expr -> m ()
+              , visitStat :: Statement -> m ()
+              , visitBlock :: Block -> m ()
+              , visitFuncDecl :: String -> Function -> m ()
+              , visitFunction :: Function -> m ()
+              , visitProgram :: Program -> m ()
+              }
+visitSourceElem :: Monad m => Visitor m -> SourceElement -> m ()
+visitFunctionBody :: Monad m => Visitor m -> FunctionBody -> m ()
+
+class CodeFragment a where
+  applyTransformer :: Monad m => Transformer m -> a -> m a
+  applyVisitor :: Monad m => Visitor m -> a -> m ()
+
+instance CodeFragment Expr where
+  applyTransformer = transformExpr
+  applyVisitor = visitExpr
+
+instance CodeFragment Statement where
+  applyTransformer = transformStat
+  applyVisitor = visitStat
+
+instance CodeFragment Block where
+  applyTransformer = transformBlock
+  applyVisitor = visitBlock
+
+instance CodeFragment FunctionBody where
+  applyTransformer = transformFunctionBody
+  applyVisitor = visitFunctionBody
+
+instance CodeFragment SourceElement where
+  applyTransformer = transformSourceElem
+  applyVisitor = visitSourceElem
+
+instance CodeFragment Function where
+  applyTransformer = transformFunction
+  applyVisitor = visitFunction
+
+instance CodeFragment Program where
+  applyTransformer = transformProgram
+  applyVisitor = visitProgram
+
+
+makeFunction name args body = fn
+  where
+    fn :: Function
+    fn = Function { functionName = name
+                  , functionArguments = args
+                  , functionBody = body
+                  , functionVariables = scanVarDecl fn
+                  , outerVariables = scanUsedVar fn
                   }
 
 transformSourceElem v (Statement st) = liftM Statement $ transformStat v st
 transformSourceElem v (FunctionDeclaration name fn)
     = liftM (FunctionDeclaration name) $ transformFuncDecl v name fn
+transformFunctionBody v (FunctionBody b)
+    = liftM FunctionBody $ mapM (transformSourceElem v) b
 
 getDefaultTransformer :: Monad m => Transformer m -> Transformer m
 getDefaultTransformer v
@@ -119,6 +166,7 @@ getDefaultTransformer v
                   , transformBlock = myBlock
                   , transformFuncDecl = myFuncDecl
                   , transformFunction = myFunction
+                  , transformProgram = myProgram
                   }
   where
     expr = transformExpr v
@@ -189,21 +237,17 @@ getDefaultTransformer v
     myStat (Labelled label s) = liftM (Labelled label) (stat s)
     myStat t@Debugger = return t
 
-    myBlock s = mapM stat s
+    myBlock (Block s) = liftM Block $ mapM stat s
     myFuncDecl name f = function f
-    myFunction f = liftM (makeFunction (functionName f) (functionArguments f)) (mapM sourceElem (functionBody f))
-
-data Monad m => Visitor m
-    = Visitor { visitExpr :: Expr -> m ()
-              , visitStat :: Statement -> m ()
-              , visitBlock :: Block -> m ()
-              , visitFuncDecl :: String -> Function -> m ()
-              , visitFunction :: Function -> m ()
-              }
+    myFunction f = liftM (makeFunction (functionName f) (functionArguments f))
+                            (transformFunctionBody v (functionBody f))
+    myProgram (Program p) = liftM Program $ mapM sourceElem p
 
 visitSourceElem v (Statement st) = visitStat v st
 visitSourceElem v (FunctionDeclaration name fn)
     = visitFuncDecl v name fn
+visitFunctionBody v (FunctionBody b)
+    = mapM_ (visitSourceElem v) b
 
 getDefaultVisitor :: Monad m => Visitor m -> Visitor m
 getDefaultVisitor v
@@ -212,6 +256,7 @@ getDefaultVisitor v
               , visitBlock = myBlock
               , visitFuncDecl = myFuncDecl
               , visitFunction = myFunction
+              , visitProgram = myProgram
               }
   where
     expr = visitExpr v
@@ -276,77 +321,90 @@ getDefaultVisitor v
     myStat (Labelled label s) = stat s
     myStat t@Debugger = return ()
 
-    myBlock s = mapM_ stat s
+    myBlock (Block s) = mapM_ stat s
     myFuncDecl name f = function f
-    myFunction f = mapM_ sourceElem (functionBody f)
+    myFunction f = visitFunctionBody v (functionBody f)
+    myProgram (Program p) = mapM_ sourceElem p
 
 
-scanVarDecl :: FunctionBody -> [String]
-scanVarDecl funcBody = flip execState ([]::[String]) $ mapM_ (visitSourceElem myVisitor) funcBody
+-- Scans declared variables in a code fragment, a function or a program
+scanVarDecl :: CodeFragment a => a -> [String]
+scanVarDecl x = flip execState ([]::[String]) $ applyVisitor myVisitor x
   where
     myVisitor,defaultVisitor :: Visitor (State [String])
     myVisitor = defaultVisitor { visitExpr = const $ return ()
                                , visitStat = myStat
                                , visitFuncDecl = myFunc
-                               , visitFunction = const $ return ()
                                }
     defaultVisitor = getDefaultVisitor myVisitor
     myStat (VarDef _ vars) = modify (`union` map fst vars)
     myStat s = visitStat defaultVisitor s
     myFunc name fn = modify (`union` [name])
 
-scanFuncDecl :: FunctionBody -> [(String,Function)]
-scanFuncDecl funcBody = flip execState [] $ mapM_ (visitSourceElem myVisitor) funcBody
+-- Scans declared functions in a function or a program
+scanFuncDecl :: CodeFragment a => a -> [(String,Function)]
+scanFuncDecl x = flip execState [] $ applyVisitor myVisitor x
   where
     myVisitor,defaultVisitor :: Visitor (State [(String,Function)])
     myVisitor = defaultVisitor { visitExpr = const $ return ()
                                , visitStat = const $ return ()
                                , visitBlock = const $ return ()
                                , visitFuncDecl = myFuncDecl
-                               , visitFunction = const $ return ()
                                }
     defaultVisitor = getDefaultVisitor myVisitor
     myFuncDecl name fn = modify ((name,fn):)
 
-scanUsedVar :: FunctionBody -> [String]
-scanUsedVar funcBody = fst $ flip execState ([],[]) $ mapM_ (visitSourceElem myVisitor) funcBody
+-- Scans variables that are referenced but not declared inside
+scanUsedVar :: CodeFragment a => a -> [String]
+scanUsedVar x = fst $ flip execState ([],[]) $ applyVisitor myVisitor x
   where
     myVisitor,defaultVisitor :: Visitor (State ([String]{-usedVariables-},[String]{-declaredVariables-}))
     myVisitor = defaultVisitor { visitExpr = myExpr
+                               , visitStat = myStat
                                , visitFunction = myFunction
                                }
     defaultVisitor = getDefaultVisitor myVisitor
+    withVariableDeclared vars f
+        = do{ (usedVariables,declaredVariables) <- get
+            ; let declaredVariables' = declaredVariables `union` vars
+            ; put (usedVariables,declaredVariables')
+            ; f
+            ; (usedVariables',_) <- get
+            ; put (usedVariables',declaredVariables)
+            }
     myExpr (Variable name)
         = do{ (usedVariables,declaredVariables) <- get
             ; when (name `notElem` declaredVariables)
                 (put (usedVariables `union` [name],declaredVariables))
             }
     myExpr (ArrayComprehension x f i)
-        = do{ let compVars = map (\(_,n,_) -> n) f
-            ; (usedVariables,declaredVariables) <- get
-            ; let declaredVariables'
-                      = declaredVariables
-                        `union` compVars
-            ; put (usedVariables,declaredVariables')
-            ; myExpr x
-            ; mapM_ myExpr $ map (\(_,_,x) -> x) f
-            ; maybe (return ()) myExpr i
-            ; (usedVariables',_) <- get
-            ; put (usedVariables',declaredVariables)
-            }
+        = withVariableDeclared (map (\(_,n,_) -> n) f)
+          $ do{ myExpr x
+              ; mapM_ myExpr $ map (\(_,_,x) -> x) f
+              ; maybe (return ()) myExpr i
+              }
     myExpr v = visitExpr defaultVisitor v
+    myStat (Try b cc uc f) = do{ visitBlock defaultVisitor b
+                               ; mapM_ tcc cc
+                               ; maybe (return ()) tuc uc
+                               ; maybe (return ()) (visitBlock defaultVisitor) f
+                               }
+      where
+        tcc (name,b,c)
+            = withVariableDeclared [name]
+              $ do{ myExpr b
+                  ; visitBlock defaultVisitor c
+                  }
+        tuc (name,b)
+            = withVariableDeclared [name]
+              $ visitBlock defaultVisitor b
+
+    myStat s = visitStat defaultVisitor s
     myFunction fn
-        = do{ (usedVariables,declaredVariables) <- get
-            ; let declaredVariables'
-                      = declaredVariables
-                        `union` functionArguments fn
+        = withVariableDeclared (functionArguments fn
                         `union` functionVariables fn
                         `union` ["arguments"]
-                        `union` maybeToList (functionName fn)
-            ; put (usedVariables,declaredVariables')
-            ; visitFunction defaultVisitor fn
-            ; (usedVariables',_) <- get
-            ; put (usedVariables',declaredVariables)
-            }
+                        `union` maybeToList (functionName fn))
+          $ visitFunction defaultVisitor fn
 
 

@@ -43,7 +43,7 @@ propertyName (PNLiteral lit) = literal lit
 
 functionParameterAndBody fn
     = (parens $ sepBy (map ident $ functionArguments fn) comma)
-      . (braces $ many $ map sourceElement $ functionBody fn)
+      . (braces $ many $ map sourceElement $ case functionBody fn of FunctionBody x -> x)
 
 literal :: Literal -> ShowS
 literal NullLiteral = ident "null"
@@ -94,7 +94,7 @@ memberExpr (FunctionExpression True fn)
              _ -> c
   where
     body' = case functionBody fn of
-              [Statement (Return b@(Just _))] -> b
+              FunctionBody [Statement (Return b@(Just _))] -> b
               _ -> Nothing
     body = fromJust body'
 memberExpr (FunctionExpression _ fn)
@@ -165,7 +165,7 @@ exprNoIn = exprBase False
 --- Statements
 ---
 
-block stats = braces $ many $ map stat stats
+block (Block stats) = braces $ many $ map stat stats
 varDecl (name,value) = ident name . option' (\e -> operator "=" . assignmentExpression e) value
 stat EmptyStat = semi
 stat (VarDef kind v) = definitionKind kind . sepBy (map varDecl v) comma . semi
@@ -239,4 +239,4 @@ sourceElement (FunctionDeclaration name fn)
     = ident "function" . ident name
       . functionParameterAndBody fn
 
-program = many . map sourceElement
+program (Program s) = many $ map sourceElement s

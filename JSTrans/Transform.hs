@@ -1,5 +1,5 @@
 module JSTrans.Transform where
-import JSTrans.AST
+import JSTrans.AST as AST
 import JSTrans.Parser.Token (reservedNames)
 import Control.Monad.State
 import Char (isDigit)
@@ -38,11 +38,12 @@ genSym = do{ n <- gets genSymCounter
            ; return ('$':show n)
            }
 
-transformProgram :: TransformOptions -> [SourceElement] -> [SourceElement]
-transformProgram options s = evalState (mapM (transformSourceElem transformer) s) initialState
+transformProgram :: TransformOptions -> Program -> Program
+transformProgram options p = evalState (AST.transformProgram transformer p) initialState
   where
     transformer = getTransformer options
-    initialN = 1+scanInternalIdentifierUse s
+    Program statements = p
+    initialN = 1+scanInternalIdentifierUse statements
     initialState = TransformerData { genSymCounter = initialN
                                    , aliasForThis = Nothing
                                    , aliasForArguments = Nothing
@@ -135,7 +136,7 @@ getTransformer options = myTransformer
             ; f' <- compFor f
             ; modify (\s -> s {isInsideImplicitlyCreatedFunction
                                    = prevIsInsideImplicitlyCreatedFunction})
-            ; let body = map Statement
+            ; let body = FunctionBody $ map Statement
                          [VarDef VariableDefinition
                                      $ (arrayName,Just $ New (Variable "Array") [])
                                            :(map (\(_,n,_) -> (n,Nothing)) f)
@@ -177,7 +178,7 @@ getTransformer options = myTransformer
             ; e' <- myExpr e
             ; modify (\s -> s {isInsideImplicitlyCreatedFunction
                                    = prevIsInsideImplicitlyCreatedFunction})
-            ; let body = [Statement $ Return (Just e')]
+            ; let body = FunctionBody [Statement $ Return (Just e')]
             ; return $ FuncCall
                          (FunctionExpression False
                             $ makeFunction Nothing
@@ -191,7 +192,7 @@ getTransformer options = myTransformer
     myStat (Try b [(varName,e,c)] Nothing f)
         | transformConditionalCatch options
         = myStat (Try b [] (Just (varName,cc)) f)
-      where cc = [If e (BlockStatement c) (Just (Throw (Variable varName)))]
+      where cc = Block [If e (BlockStatement c) (Just (Throw (Variable varName)))]
     myStat (Try b c@(_:_) uc f)
         | transformConditionalCatch options
         = do{ varName <- genSym
@@ -202,24 +203,33 @@ getTransformer options = myTransformer
                   cc ((n,e,x):xs) = If (substVarInExpr e n varName)
                                        (BlockStatement (substVarInBlock x n varName))
                                        (Just (cc xs))
-              in myStat (Try b [] (Just (varName,[cc c])) f)
+              in myStat (Try b [] (Just (varName,Block [cc c])) f)
             }
     myStat (ForEach (ExpressionStatement lhs) o body)
         | transformForEach options
         = do{ objName <- genSym
             ; keyName <- genSym
             ; o' <- myExpr o
-            ; return (BlockStatement [VarDef VariableDefinition [(objName,Just o')]
-                                     ,ForIn (VarDef VariableDefinition [(keyName,Nothing)]) (Variable objName) (BlockStatement [ExpressionStatement (Assign "=" lhs (Variable keyName)),body])])
+            ; return (BlockStatement
+                      $ Block [VarDef VariableDefinition [(objName,Just o')]
+                              ,ForIn (VarDef VariableDefinition [(keyName,Nothing)])
+                                     (Variable objName)
+                                     (BlockStatement
+                                      $ Block [ExpressionStatement (Assign "=" lhs (Variable keyName)),body])])
             }
     myStat (ForEach def@(VarDef kind [(valName,_)]) o body)
         | transformForEach options
         = do{ objName <- genSym
             ; keyName <- genSym
             ; o' <- myExpr o
-            ; return (BlockStatement [VarDef VariableDefinition [(objName,Just o')]
-                                     ,def
-                                     ,ForIn (VarDef VariableDefinition [(keyName,Nothing)]) (Variable objName) (BlockStatement [ExpressionStatement (Assign "=" (Variable valName) (Variable keyName)),body])])
+            ; return (BlockStatement
+                      $ Block
+                            [VarDef VariableDefinition [(objName,Just o')]
+                            ,def
+                            ,ForIn (VarDef VariableDefinition [(keyName,Nothing)])
+                                   (Variable objName)
+                                   (BlockStatement
+                                    $ Block [ExpressionStatement (Assign "=" (Variable valName) (Variable keyName)),body])])
             }
     myStat x = transformStat defaultTransformer x
 
@@ -245,13 +255,15 @@ getTransformer options = myTransformer
                                 = (maybe [] (\s -> [(s,Just This)]) aliasForThis')
                                   ++ (maybe [] (\s -> [(s,Just (Variable "arguments"))])
                                             aliasForArguments')
-                      ; let fn'' = if null internalVars
-                                    then fn'
-                                    else makeFunction
-                                             (functionName fn')
-                                             (functionArguments fn')
-                                             ((Statement $ VarDef VariableDefinition internalVars)
-                                                : functionBody fn')
+                      ; let fn''
+                                = if null internalVars
+                                   then fn'
+                                   else makeFunction
+                                            (functionName fn')
+                                            (functionArguments fn')
+                                            (case functionBody fn' of
+                                               FunctionBody body
+                                                   -> FunctionBody ((Statement $ VarDef VariableDefinition internalVars):body))
                       ; modify (\s -> s { aliasForThis = prevAliasForThis
                                         , aliasForArguments = prevAliasForArguments
                                         , isInsideImplicitlyCreatedFunction
