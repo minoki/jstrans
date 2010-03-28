@@ -15,7 +15,7 @@ data TransformOptions = TransformOptions
   , transformLetExpression :: Bool
   , transformLetStatement :: Bool -- not implemented
   , transformLetDefinition :: Bool -- not implemented
-  , transformDestructingAssignment :: Bool -- not parsed
+  , transformDestructuringAssignment :: Bool -- not parsed
   , transformReservedNameAsIdentifier :: Bool
   , transformExpressionClosure :: Bool
   , transformGeneratorExpression :: Bool -- not parsed
@@ -55,11 +55,11 @@ transformAll = TransformOptions
   { transformConditionalCatch = True
   , transformForEach = True
   , transformGenerator = True -- not parsed
-  , transformArrayComprehension = True -- not parsed
-  , transformLetExpression = True -- not parsed
+  , transformArrayComprehension = True
+  , transformLetExpression = True
   , transformLetStatement = True -- not parsed
   , transformLetDefinition = True
-  , transformDestructingAssignment = True -- not parsed
+  , transformDestructuringAssignment = True -- not parsed
   , transformReservedNameAsIdentifier = True
   , transformExpressionClosure = True
   , transformGeneratorExpression = True -- not parsed
