@@ -17,6 +17,11 @@ data Literal = NullLiteral
              | BooleanLiteral Bool
              | StringLiteral String
                deriving (Eq,Show)
+data LHSPattern a = LHSSimple a
+                  | LHSArray [Maybe (LHSPattern a)]
+                  | LHSObject [(PropertyName,LHSPattern)]
+                    deriving (Eq,Show)
+type LHSPatternNoExpr = LHSPattern String
 data PropertyName = PNIdentifier String
                   | PNLiteral Literal
                     deriving (Eq,Show)
