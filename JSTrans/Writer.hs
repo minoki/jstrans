@@ -41,8 +41,21 @@ operator x rest@(y:_) | (isIdentifierPart (head x) && isIdentifierPart y)
 propertyName (PNIdentifier name) = ident name
 propertyName (PNLiteral lit) = literal lit
 
+pattern e (LHSSimple a) = e a
+pattern e (LHSArray elems) = squares $ sepBy (map element elems) comma
+  where
+    element Nothing = id
+    element (Just x) = pattern e x
+pattern e (LHSObject elems) = braces $ sepBy (map element elems) comma
+  where
+    element (name,pat) = propertyName name
+                         . colon
+                         . pattern e pat
+patternNoExpr = pattern ident
+patternExpr = pattern leftHandSideExpression
+
 functionParameterAndBody fn
-    = (parens $ sepBy (map ident $ functionArguments fn) comma)
+    = (parens $ sepBy (map patternNoExpr $ functionArguments fn) comma)
       . (braces $ many $ map sourceElement $ case functionBody fn of FunctionBody x -> x)
 
 literal :: Literal -> ShowS
@@ -69,7 +82,7 @@ primaryExpr (ArrayComprehension x f i) = squares $ expr x . (many $ map compFor 
           . (if k == CompForIn
               then id
               else ident "each")
-          . (parens $ ident n . ident "in" . expr e)
+          . (parens $ patternNoExpr n . ident "in" . expr e)
     compIf e = ident "if" . (parens $ expr e)
 
 primaryExpr (ObjectLiteral elems) = braces $ sepBy (map element elems) comma
@@ -87,7 +100,7 @@ memberExpr (FunctionExpression True fn)
     | isJust body'
     = ident "function"
       . option' ident (functionName fn)
-      . parens (sepBy (map ident $ functionArguments fn) comma)
+      . parens (sepBy (map patternNoExpr $ functionArguments fn) comma)
       . let c = assignmentExpression body -- TODO: allowIn
         in case c "" of
              '{':_ -> parens c
@@ -150,7 +163,7 @@ conditionalExpressionBase allowIn (Cond x y z)
       . operator ":" . assignmentExpressionBase allowIn z
 conditionalExpressionBase allowIn e = logicalORExpressionBase allowIn e
 assignmentExpressionBase allowIn (Assign op x y)
-    = leftHandSideExpression x
+    = patternExpr x -- leftHandSideExpression
       . operator op . assignmentExpressionBase allowIn y
 assignmentExpressionBase allowIn e = conditionalExpressionBase allowIn e
 exprBase allowIn (Binary "," x y)
@@ -166,7 +179,7 @@ exprNoIn = exprBase False
 ---
 
 block (Block stats) = braces $ many $ map stat stats
-varDecl (name,value) = ident name . option' (\e -> operator "=" . assignmentExpression e) value
+varDecl (name,value) = patternNoExpr name . option' (\e -> operator "=" . assignmentExpression e) value
 stat EmptyStat = semi
 stat (VarDef kind v) = definitionKind kind . sepBy (map varDecl v) comma . semi
 stat (LetStatement v b) = ident "let" . (parens $ sepBy (map varDecl v) comma) . block b
@@ -197,18 +210,18 @@ stat (For (Just (ExpressionStatement a)) b c d)
     = ident "for" . parens (exprNoIn a . semi . option' expr b
                             . semi . option' expr c)
       . stat d
-stat (ForIn (VarDef kind [var]) b body)
-    = ident "for" . parens (definitionKind kind . varDecl var . ident "in" . expr b)
+stat (ForIn (ForInVarDef kind var e) b body)
+    = ident "for" . parens (definitionKind kind . varDecl (var,e) . ident "in" . expr b)
       . stat body
-stat (ForIn (ExpressionStatement a) b body)
-    = ident "for" . parens (leftHandSideExpression a . ident "in" . expr b)
+stat (ForIn (ForInLHSExpr a) b body)
+    = ident "for" . parens (patternExpr a . ident "in" . expr b)
       . stat body
-stat (ForEach (VarDef kind [var]) b body)
-    = ident "for each" . parens (definitionKind kind . varDecl var
+stat (ForEach (ForInVarDef kind var e) b body)
+    = ident "for each" . parens (definitionKind kind . varDecl (var,e)
                                  . ident "in" . expr b)
       . stat body
-stat (ForEach (ExpressionStatement a) b body)
-    = ident "for each" . parens (leftHandSideExpression a . ident "in" . expr b)
+stat (ForEach (ForInLHSExpr a) b body)
+    = ident "for each" . parens (patternExpr a . ident "in" . expr b)
       . stat body
 stat (Try body conditionalCatchClauses unconditionalCatchClause finallyClause)
     = ident "try" . block body
@@ -217,9 +230,9 @@ stat (Try body conditionalCatchClauses unconditionalCatchClause finallyClause)
       . maybe id f finallyClause
   where
     c (vname,cond,body) = ident "catch"
-                          . parens (ident vname . ident "if" . expr cond)
+                          . parens (patternNoExpr vname . ident "if" . expr cond)
                           . block body
-    u (vname,body) = ident "catch" . parens (ident vname) . block body
+    u (vname,body) = ident "catch" . parens (patternNoExpr vname) . block body
     f body = ident "finally" . block body
 stat (Switch e clauses) = ident "switch" . (parens $ expr e)
                           . (braces $ many $ map c clauses)

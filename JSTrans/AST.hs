@@ -5,7 +5,7 @@ import Text.ParserCombinators.Parsec.Expr (Assoc)
 import Monad
 import Control.Monad.State
 import List
-import Maybe (maybeToList)
+import Maybe (maybeToList,catMaybes)
 
 type Operator = String
 operatorForName :: String -> Operator
@@ -19,8 +19,9 @@ data Literal = NullLiteral
                deriving (Eq,Show)
 data LHSPattern a = LHSSimple a
                   | LHSArray [Maybe (LHSPattern a)]
-                  | LHSObject [(PropertyName,LHSPattern)]
+                  | LHSObject [(PropertyName,LHSPattern a)]
                     deriving (Eq,Show)
+type LHSPatternExpr = LHSPattern Expr
 type LHSPatternNoExpr = LHSPattern String
 data PropertyName = PNIdentifier String
                   | PNLiteral Literal
@@ -36,25 +37,28 @@ data Expr = Binary Operator Expr Expr
           | FuncCall Expr [Expr]
           | ArrayLiteral [Maybe Expr]
           | ArrayComprehension Expr
-              [(ComprehensionKind,String,Expr) {- for / for each -}]
+              [(ComprehensionKind,LHSPatternNoExpr,Expr) {- for / for each -}]
               (Maybe Expr {- if -})
           | ObjectLiteral [(PropertyName,Either Expr (AccessorKind,Function))]
-          | Let [(String,Maybe Expr)] Expr
+          | Let [(LHSPatternNoExpr,Maybe Expr)] Expr
           | FunctionExpression Bool{-isExpressionClosure-} Function
           | Variable String
           | Literal Literal
           | This
           | New Expr [Expr]
-          | Assign Operator Expr Expr
+          | Assign Operator LHSPatternExpr Expr
             deriving (Eq,Show)
 data DefinitionKind = VariableDefinition
                     | ConstantDefinition
                     | LetDefinition
                       deriving (Eq,Show)
 newtype Block = Block [Statement] deriving (Eq,Show)
+data ForInHead = ForInLHSExpr LHSPatternExpr
+               | ForInVarDef DefinitionKind LHSPatternNoExpr (Maybe Expr)
+                 deriving (Eq,Show)
 data Statement = EmptyStat
-               | VarDef DefinitionKind [(String,Maybe Expr)]
-               | LetStatement [(String,Maybe Expr)] Block
+               | VarDef DefinitionKind [(LHSPatternNoExpr,Maybe Expr)]
+               | LetStatement [(LHSPatternNoExpr,Maybe Expr)] Block
                | ExpressionStatement Expr
                | Return (Maybe Expr)
                | Throw Expr
@@ -65,9 +69,9 @@ data Statement = EmptyStat
 -- | ForE (Maybe Expr) (Maybe Expr) (Maybe Expr) Statement
 -- | ForE DefinitionKind String (Maybe Expr) (Maybe Expr) (Maybe Expr) Statement
                | For (Maybe Statement) (Maybe Expr) (Maybe Expr) Statement
-               | ForIn Statement Expr Statement
-               | ForEach Statement Expr Statement
-               | Try Block [(String,Expr,Block)] (Maybe (String,Block)) (Maybe Block)
+               | ForIn ForInHead Expr Statement
+               | ForEach ForInHead Expr Statement
+               | Try Block [(LHSPatternNoExpr,Expr,Block)] (Maybe (LHSPatternNoExpr,Block)) (Maybe Block)
                | Switch Expr [SwitchClause]
                | Break (Maybe String)
                | Continue (Maybe String)
@@ -85,13 +89,13 @@ newtype Program = Program [SourceElement] deriving (Eq,Show)
 
 data Function
     = Function { functionName :: Maybe String
-               , functionArguments :: [String]
+               , functionArguments :: [LHSPatternNoExpr]
                , functionBody :: FunctionBody
                , functionVariables :: [String] -- variables and functions explicitly declared inside the function
                , outerVariables :: [String] -- variables used in this function and not declared inside
 --               , innerFunctions :: [Function]
                } deriving (Eq,Show)
-makeFunction :: Maybe String -> [String] -> FunctionBody -> Function
+makeFunction :: Maybe String -> [LHSPatternNoExpr] -> FunctionBody -> Function
 
 data Monad m => Transformer m
     = Transformer { transformExpr :: Expr -> m Expr
@@ -147,6 +151,21 @@ instance CodeFragment Program where
   applyTransformer = transformProgram
   applyVisitor = visitProgram
 
+-- workaround (should use -XFlexibleInstances?)
+class StringToList a where
+  stringToList :: String -> [a]
+
+instance StringToList Char where
+  stringToList = id
+
+class PatternFromIdentifier a where
+  patternFromIdentifier :: String -> a
+
+instance StringToList a => PatternFromIdentifier [a] where -- String
+  patternFromIdentifier = stringToList
+
+instance PatternFromIdentifier Expr where
+  patternFromIdentifier = Variable
 
 makeFunction name args body = fn
   where
@@ -187,6 +206,13 @@ getDefaultTransformer v
     mmap f (Just x) = f x >>= return . Just
     mmap f Nothing = return Nothing
 
+    patternExpr (LHSSimple a) = liftM LHSSimple $ expr a
+    patternExpr (LHSArray elems) = liftM LHSArray $ mapM (mmap patternExpr) elems
+    patternExpr (LHSObject elems) = liftM LHSObject $ mapM (\(name,pat) -> do{ pat' <- patternExpr pat ; return (name,pat') }) elems
+
+    forInHead (ForInLHSExpr e) = liftM ForInLHSExpr $ patternExpr e
+    forInHead (ForInVarDef kind pat e) = liftM (ForInVarDef kind pat) (mmap expr e)
+
     myExpr (Binary op x y) = liftM2 (Binary op) (expr x) (expr y)
     myExpr (Prefix op x) = liftM (Prefix op) (expr x)
     myExpr (Postfix op x) = liftM (Postfix op) (expr x)
@@ -216,7 +242,7 @@ getDefaultTransformer v
     myExpr t@(Literal _) = return t
     myExpr t@This = return t
     myExpr (New ctor args) = liftM2 New (expr ctor) (mapM expr args)
-    myExpr (Assign op x y) = liftM2 (Assign op) (expr x) (expr y)
+    myExpr (Assign op x y) = liftM2 (Assign op) (patternExpr x) (expr y)
 
     myStat t@EmptyStat = return t
     myStat (VarDef kind l) = liftM (VarDef kind) (mapM varDecl l)
@@ -229,8 +255,8 @@ getDefaultTransformer v
     myStat (While c b) = liftM2 While (expr c) (stat b)
     myStat (DoWhile c b) = liftM2 DoWhile (expr c) (stat b)
     myStat (For a b c d) = liftM4 For (mmap stat a) (mmap expr b) (mmap expr c) (stat d)
-    myStat (ForIn a b c) = liftM3 ForIn (stat a) (expr b) (stat c)
-    myStat (ForEach a b c) = liftM3 ForEach (stat a) (expr b) (stat c)
+    myStat (ForIn a b c) = liftM3 ForIn (forInHead a) (expr b) (stat c)
+    myStat (ForEach a b c) = liftM3 ForEach (forInHead a) (expr b) (stat c)
     myStat (Try b cc uc f) = liftM4 Try (block b) (mapM tcc cc) (mmap tuc uc) (mmap block f)
       where tcc (a,b,c) = liftM2 ((,,) a) (expr b) (block c)
             tuc (a,b) = liftM ((,) a) (block b)
@@ -280,6 +306,13 @@ getDefaultVisitor v
                          ; return (name,v)
                          }
 
+    patternExpr (LHSSimple a) = expr a
+    patternExpr (LHSArray elems) = mapM_ (mmap_ patternExpr) elems
+    patternExpr (LHSObject elems) = mapM_ (patternExpr . snd) elems
+
+    forInHead (ForInLHSExpr e) = patternExpr e
+    forInHead (ForInVarDef kind pat e) = mmap_ expr e
+
     myExpr (Binary _ x y) = expr x >> expr y
     myExpr (Prefix _ x) = expr x
     myExpr (Postfix _ x) = expr x
@@ -300,7 +333,7 @@ getDefaultVisitor v
     myExpr t@(Literal _) = return ()
     myExpr t@This = return ()
     myExpr (New ctor args) = expr ctor >> mapM_ expr args
-    myExpr (Assign _ x y) = expr x >> expr y
+    myExpr (Assign _ x y) = patternExpr x >> expr y
 
     myStat t@EmptyStat = return ()
     myStat (VarDef _ l) = mapM_ varDecl l
@@ -313,8 +346,8 @@ getDefaultVisitor v
     myStat (While c b) = expr c >> stat b
     myStat (DoWhile c b) = expr c >> stat b
     myStat (For a b c d) = mmap_ stat a >> mmap_ expr b >> mmap_ expr c >> stat d
-    myStat (ForIn a b c) = stat a >> expr b >> stat c
-    myStat (ForEach a b c) = stat a >> expr b >> stat c
+    myStat (ForIn a b c) = forInHead a >> expr b >> stat c
+    myStat (ForEach a b c) = forInHead a >> expr b >> stat c
     myStat (Try b cc uc f) = block b >> mapM_ tcc cc >> mmap_ tuc uc >> mmap_ block f
       where tcc (a,b,c) = expr b >> block c
             tuc (a,b) = block b
@@ -342,7 +375,7 @@ scanVarDecl x = flip execState ([]::[String]) $ applyVisitor myVisitor x
                                , visitFuncDecl = myFunc
                                }
     defaultVisitor = getDefaultVisitor myVisitor
-    myStat (VarDef _ vars) = modify (`union` map fst vars)
+    myStat (VarDef _ vars) = modify (`union` concatMap (patternComponents . fst) vars)
     myStat s = visitStat defaultVisitor s
     myFunc name fn = modify (`union` [name])
 
@@ -383,7 +416,7 @@ scanUsedVar x = fst $ flip execState ([],[]) $ applyVisitor myVisitor x
                 (put (usedVariables `union` [name],declaredVariables))
             }
     myExpr (ArrayComprehension x f i)
-        = withVariableDeclared (map (\(_,n,_) -> n) f)
+        = withVariableDeclared (concatMap (\(_,n,_) -> patternComponents n) f)
           $ do{ myExpr x
               ; mapM_ myExpr $ map (\(_,_,x) -> x) f
               ; maybe (return ()) myExpr i
@@ -396,20 +429,29 @@ scanUsedVar x = fst $ flip execState ([],[]) $ applyVisitor myVisitor x
                                }
       where
         tcc (name,b,c)
-            = withVariableDeclared [name]
+            = withVariableDeclared (patternComponents name)
               $ do{ myExpr b
                   ; visitBlock defaultVisitor c
                   }
         tuc (name,b)
-            = withVariableDeclared [name]
+            = withVariableDeclared (patternComponents name)
               $ visitBlock defaultVisitor b
 
     myStat s = visitStat defaultVisitor s
     myFunction fn
-        = withVariableDeclared (functionArguments fn
+        = withVariableDeclared (concatMap patternComponents (functionArguments fn)
                         `union` functionVariables fn
                         `union` ["arguments"]
                         `union` maybeToList (functionName fn))
           $ visitFunction defaultVisitor fn
 
 
+patternComponents :: LHSPattern a -> [a]
+patternComponents (LHSSimple x) = [x]
+patternComponents (LHSArray elems) = concatMap patternComponents $ catMaybes elems
+patternComponents (LHSObject elems) = concatMap (patternComponents . snd) elems
+
+patternNoExprToExpr :: LHSPatternNoExpr -> LHSPatternExpr
+patternNoExprToExpr (LHSSimple x) = LHSSimple $ Variable x
+patternNoExprToExpr (LHSArray elems) = LHSArray $ map (fmap patternNoExprToExpr) elems
+patternNoExprToExpr (LHSObject elems) = LHSObject $ map (\(n,x) -> (n,patternNoExprToExpr x)) elems

@@ -4,6 +4,7 @@ import JSTrans.Parser.Prim (Parser,option',allowIn,disallowIn,isInAllowed)
 import JSTrans.Parser.Token
 import Text.ParserCombinators.Parsec hiding (Parser,parse)
 import Text.ParserCombinators.Parsec.Expr as ParsecExpr
+import Monad
 
 -- Expressions
 literal :: Parser Literal
@@ -14,6 +15,9 @@ unaryExpr :: Parser Expr
 logicalORExprBase,conditionalExprBase,exprBase :: Parser Expr
 assignmentExpr,assignmentExprNoIn :: Parser Expr
 expr,exprNoIn :: Parser Expr
+
+patternExpr :: Parser LHSPatternExpr
+patternNoExpr :: Parser LHSPatternNoExpr
 
 --- Statements
 block :: Parser Block
@@ -70,7 +74,7 @@ arrayLiteral
                 ; kind <- (reserved "each" >> return CompForEach)
                       <|> return CompForIn
                 ; parens
-                  $ do{ n <- identifierExcludingEvalOrArguments
+                  $ do{ n <- patternNoExpr
                       ; reserved "in"
                       ; e <- expr
                       ; return $ (kind,n,e)
@@ -91,7 +95,7 @@ objectLiteral = fmap ObjectLiteral $ braces $ sepEndBy propertyAssignment comma
             ; return (name,Right (Getter,fn))
             }
       <|> do{ name <- try (reserved "set" >> propertyName)
-            ; paramName <- parens identifierExcludingEvalOrArguments
+            ; paramName <- parens patternNoExpr
             ; body <- braces functionBody
             ; let fn = makeFunction Nothing [paramName] body
             ; return (name,Right (Setter,fn))
@@ -226,7 +230,7 @@ conditionalExprBase
 assignmentExprBase
     = do{ (lhs,op)
               <- try $ 
-                 do{ lhs <- leftHandSideExpr
+                 do{ lhs <- patternExpr
                    ; op <- assignmentOperator
                    ; return (lhs,op)
                    } 
@@ -254,6 +258,32 @@ expr = allowIn exprBase
 exprNoIn = disallowIn exprBase
 
 
+pattern :: PatternFromIdentifier a => Parser a -> Parser (LHSPattern a)
+pattern e = squares arrayPattern
+        <|> braces objectPattern
+        <|> liftM LHSSimple e
+  where
+    arrayPattern = liftM LHSArray $ sepBy (option' (pattern e)) comma
+    objectPattern = liftM LHSObject $ sepEndBy propertyAssignment comma
+    propertyAssignment
+        = do{ name <- propertyName
+            ; do{ colon
+                ; value <- pattern e
+                ; return (name,value)
+                }
+          <|> case name of
+                PNIdentifier "eval" -> unexpected "SyntaxError: variable name \"eval\" or \"arguments\" is fobidden here"
+                PNIdentifier "arguments" -> unexpected "SyntaxError: variable name \"eval\" or \"arguments\" is fobidden here"
+                PNIdentifier ident -> return (name,LHSSimple $ patternFromIdentifier ident)
+                _ -> pzero
+            }
+    propertyName :: Parser PropertyName
+    propertyName = fmap PNIdentifier identifierOrReserved -- EXT
+               <|> fmap PNLiteral (stringLiteral <|> numericLiteral)
+patternExpr = pattern leftHandSideExpr
+patternNoExpr = pattern identifierExcludingEvalOrArguments
+
+
 ---
 --- Statements
 ---
@@ -266,7 +296,7 @@ varStatement = do{ defKind <- definition
                  }
 
 varDeclarationBase
-    = do{ name <- identifierExcludingEvalOrArguments
+    = do{ name <- patternNoExpr
         ; init <- option' (reservedOp "=" >> assignmentExprBase)
         ; return (name,init)
         }
@@ -340,11 +370,11 @@ iterationStatement = doWhileStatement
                 ; return (For e0 e1 e2)
                 }
     forInHead ctor
-        = do{ e0 <- fmap ExpressionStatement leftHandSideExpr
+        = do{ e0 <- fmap ForInLHSExpr patternExpr
                 <|> do{ kind <- (reserved "var" >> return VariableDefinition)
                             <|> (reserved "let" >> return LetDefinition)
-                      ; decl <- varDeclarationNoIn
-                      ; return $ VarDef kind [decl]
+                      ; (n,v) <- varDeclarationNoIn
+                      ; return $ ForInVarDef kind n v
                       }
             ; reserved "in"
             ; e1 <- expr
@@ -421,11 +451,11 @@ tryStatement
             }
         }
   where
-    catchClauses :: Parser ([(String,Expr,Block)],Maybe (String,Block))
+    catchClauses :: Parser ([(LHSPatternNoExpr,Expr,Block)],Maybe (LHSPatternNoExpr,Block))
     catchClauses
         = do{ reserved "catch"
             ; reservedOp "("
-            ; name <- identifierExcludingEvalOrArguments
+            ; name <- patternNoExpr
             ; do{ reservedOp ")"
                 ; body <- block
                 ; return ([],Just (name,body))
@@ -471,8 +501,8 @@ sourceElement = fmap Statement statement
 functionDeclaration
     = do{ reserved "function"
         ; name <- identifierExcludingEvalOrArguments
-        ; params <- parens $ sepBy identifierExcludingEvalOrArguments comma
-        ; checkDuplicate params
+        ; params <- parens $ sepBy patternNoExpr comma
+        ; checkDuplicate $ concatMap patternComponents params
         ; body <- braces functionBody
         ; let fn = makeFunction Nothing params body
         ; return $ FunctionDeclaration name fn
@@ -480,8 +510,8 @@ functionDeclaration
 functionExpr
     = do{ reserved "function"
         ; name <- option' identifierExcludingEvalOrArguments
-        ; params <- parens $ sepBy identifierExcludingEvalOrArguments comma
-        ; checkDuplicate params
+        ; params <- parens $ sepBy patternNoExpr comma
+        ; checkDuplicate $ concatMap patternComponents params
         ; (isEC,body) <- (fmap (\x -> (False,x)) $ braces functionBody)
                      <|> (fmap (\e -> (True,FunctionBody [Statement (Return (Just e))]))
                                    $ assignmentExprBase) -- EXT: Expression Closure

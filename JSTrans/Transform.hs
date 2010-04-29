@@ -123,7 +123,7 @@ getTransformer options = myTransformer
                           ; rest' <- compFor rest
                           ; return
                             $ (if kind == CompForIn then ForIn else ForEach)
-                                  (ExpressionStatement $ Variable varName) objExpr' rest'
+                                  (ForInLHSExpr $ patternNoExprToExpr varName) objExpr' rest'
                           }
                   compFor [] = do{ x' <- myExpr x
                                  ; let p = ExpressionStatement
@@ -138,8 +138,8 @@ getTransformer options = myTransformer
                                    = prevIsInsideImplicitlyCreatedFunction})
             ; let body = FunctionBody $ map Statement
                          [VarDef VariableDefinition
-                                     $ (arrayName,Just $ New (Variable "Array") [])
-                                           :(map (\(_,n,_) -> (n,Nothing)) f)
+                                     $ (LHSSimple arrayName,Just $ New (Variable "Array") [])
+                                           :(map (\(_,n,_) -> (n,Nothing)) f) -- TODO: apply transformations to this
                          ,f'
                          ,Return (Just arrayVar)
                          ]
@@ -189,9 +189,9 @@ getTransformer options = myTransformer
     myExpr x = transformExpr defaultTransformer x
 
     myStat :: Statement -> TransformerState Statement
-    myStat (Try b [(varName,e,c)] Nothing f)
+    myStat (Try b [(var@(LHSSimple varName),e,c)] Nothing f)
         | transformConditionalCatch options
-        = myStat (Try b [] (Just (varName,cc)) f)
+        = myStat (Try b [] (Just (var,cc)) f)
       where cc = Block [If e (BlockStatement c) (Just (Throw (Variable varName)))]
     myStat (Try b c@(_:_) uc f)
         | transformConditionalCatch options
@@ -199,37 +199,41 @@ getTransformer options = myTransformer
             ; let
                   cc [] = case uc of
                             Nothing -> (Throw (Variable varName))
-                            Just (n,x) -> BlockStatement (substVarInBlock x n varName)
-                  cc ((n,e,x):xs) = If (substVarInExpr e n varName)
-                                       (BlockStatement (substVarInBlock x n varName))
-                                       (Just (cc xs))
-              in myStat (Try b [] (Just (varName,Block [cc c])) f)
+                            Just (LHSSimple n,x) -> BlockStatement (substVarInBlock x n varName)
+                            Just (pat,x) -> undefined {-BlockStatement (substVarInBlock x n varName)-}
+                  cc ((LHSSimple n,e,x):xs) = If (substVarInExpr e n varName)
+                                                 (BlockStatement (substVarInBlock x n varName))
+                                                 (Just (cc xs))
+                  cc ((n,e,x):xs) = undefined {-If (substVarInExpr e n varName)
+                                                 (BlockStatement (substVarInBlock x n varName))
+                                                 (Just (cc xs))-} -- FIXME
+              in myStat (Try b [] (Just (LHSSimple varName,Block [cc c])) f)
             }
-    myStat (ForEach (ExpressionStatement lhs) o body)
+    myStat (ForEach (ForInLHSExpr lhs) o body)
         | transformForEach options
         = do{ objName <- genSym
             ; keyName <- genSym
             ; o' <- myExpr o
             ; return (BlockStatement
-                      $ Block [VarDef VariableDefinition [(objName,Just o')]
-                              ,ForIn (VarDef VariableDefinition [(keyName,Nothing)])
+                      $ Block [VarDef VariableDefinition [(LHSSimple objName,Just o')]
+                              ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
                                      (Variable objName)
                                      (BlockStatement
                                       $ Block [ExpressionStatement (Assign "=" lhs (Variable keyName)),body])])
             }
-    myStat (ForEach def@(VarDef kind [(valName,_)]) o body)
+    myStat (ForEach (ForInVarDef kind valName init) o body)
         | transformForEach options
         = do{ objName <- genSym
             ; keyName <- genSym
             ; o' <- myExpr o
             ; return (BlockStatement
                       $ Block
-                            [VarDef VariableDefinition [(objName,Just o')]
-                            ,def
-                            ,ForIn (VarDef VariableDefinition [(keyName,Nothing)])
+                            [VarDef VariableDefinition [(LHSSimple objName,Just o')]
+                            ,VarDef kind [(valName,init)] -- FIXME: be recursive
+                            ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
                                    (Variable objName)
                                    (BlockStatement
-                                    $ Block [ExpressionStatement (Assign "=" (Variable valName) (Variable keyName)),body])])
+                                    $ Block [ExpressionStatement (Assign "=" (patternNoExprToExpr valName) (Variable keyName)),body])])
             }
     myStat x = transformStat defaultTransformer x
 
@@ -252,8 +256,8 @@ getTransformer options = myTransformer
                       ; aliasForThis' <- gets aliasForThis
                       ; aliasForArguments' <- gets aliasForArguments
                       ; let internalVars
-                                = (maybe [] (\s -> [(s,Just This)]) aliasForThis')
-                                  ++ (maybe [] (\s -> [(s,Just (Variable "arguments"))])
+                                = (maybe [] (\s -> [(LHSSimple s,Just This)]) aliasForThis')
+                                  ++ (maybe [] (\s -> [(LHSSimple s,Just (Variable "arguments"))])
                                             aliasForArguments')
                       ; let fn''
                                 = if null internalVars
@@ -290,13 +294,16 @@ scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVis
             ; put $ max n m
             }
     handleIdentifier _ = return ()
+    handlePattern (LHSSimple name) = handleIdentifier name
+    handlePattern (LHSArray elems) = mapM_ (maybe (return ()) handlePattern) elems
+    handlePattern (LHSObject elems) = mapM_ (handlePattern . snd) elems
     myExpr (Variable name) = handleIdentifier name
     myExpr v = visitExpr defaultVisitor v
-    myStat (VarDef _ vars) = mapM_ handleIdentifier $ map fst vars
+    myStat (VarDef _ vars) = mapM_ handlePattern $ map fst vars
     myStat s = visitStat defaultVisitor s
     myFuncDecl name fn = handleIdentifier name >> visitFuncDecl defaultVisitor name fn
     myFunction fn
-        = do{ mapM_ handleIdentifier $ functionArguments fn
+        = do{ mapM_ handlePattern $ functionArguments fn
             ; mapM_ handleIdentifier $ functionVariables fn
             ; mapM_ handleIdentifier $ maybeToList (functionName fn)
             ; --TODO: let variable
@@ -317,18 +324,22 @@ substVar from to = myTransformer
     defaultTransformer = getDefaultTransformer myTransformer
     ident name | name == from = to
                | otherwise = name
+    pattern p@(LHSSimple name) | name == from = LHSSimple to
+                               | otherwise = p
+    pattern (LHSArray elems) = LHSArray $ map (fmap pattern) elems
+    pattern (LHSObject elems) = LHSObject $ map (\(name,pat) -> (name,pattern pat)) elems
     myExpr (Variable name) = return (Variable $ ident name)
     myExpr v = transformExpr defaultTransformer v
     myStat (VarDef kind vars) = do{ vars' <- mapM varDecl vars
                                   ; return $ VarDef kind vars'
                                   }
       where varDecl (name,Just e) = do{ e' <- myExpr e
-                                      ; return (ident name,Just e')
+                                      ; return (pattern name,Just e')
                                       }
-            varDecl (name,Nothing) = return (ident name,Nothing)
+            varDecl (name,Nothing) = return (pattern name,Nothing)
     myStat s = transformStat defaultTransformer s
     myFunction fn
-        = if from `elem` functionArguments fn
+        = if from `elem` concatMap patternComponents (functionArguments fn)
           || from `elem` functionVariables fn
           || from == "argument"
           || Just from == functionName fn
