@@ -4,7 +4,7 @@ import JSTrans.Parser.Token (reservedNames)
 import Control.Monad.State
 import Char (isDigit)
 import Numeric (readDec)
-import Maybe (maybeToList,isJust,isNothing,fromJust)
+import Maybe (maybeToList,isJust,isNothing,fromJust,catMaybes)
 import List (union)
 
 data TransformOptions = TransformOptions
@@ -15,7 +15,7 @@ data TransformOptions = TransformOptions
   , transformLetExpression :: Bool
   , transformLetStatement :: Bool -- not implemented
   , transformLetDefinition :: Bool -- not implemented
-  , transformDestructuringAssignment :: Bool -- not parsed
+  , transformDestructuringAssignment :: Bool -- not implemented
   , transformReservedNameAsIdentifier :: Bool
   , transformExpressionClosure :: Bool
   , transformGeneratorExpression :: Bool -- not parsed
@@ -59,7 +59,7 @@ transformAll = TransformOptions
   , transformLetExpression = True
   , transformLetStatement = True -- not parsed
   , transformLetDefinition = True
-  , transformDestructuringAssignment = True -- not parsed
+  , transformDestructuringAssignment = True
   , transformReservedNameAsIdentifier = True
   , transformExpressionClosure = True
   , transformGeneratorExpression = True -- not parsed
@@ -345,3 +345,28 @@ substVar from to = myTransformer
           || Just from == functionName fn
            then return fn
            else transformFunction defaultTransformer fn
+
+
+unpackPatternNoExpr :: LHSPatternNoExpr -> Expr -> TransformerState [(String,Expr)]
+unpackPatternNoExpr (LHSSimple name) e = return [(name,e)]
+unpackPatternNoExpr (LHSArray elems) e = liftM concat $ sequence $ zipWith elem elems [0..]
+  where elem Nothing _ = return []
+        elem (Just pat) i
+            | isEmptyPattern pat = return []
+            | isSingleElementPattern pat = unpackPatternNoExpr pat (referIndex e i)
+            | otherwise = do{ tmpName <- genSym
+                            ; inner <- unpackPatternNoExpr pat (Variable tmpName)
+                            ; return $ (tmpName,referIndex e i):inner
+                            }
+        referIndex e i = Index e $ Literal $ NumericLiteral $ show i
+unpackPatternNoExpr (LHSObject elems) e = liftM concat $ sequence $ map elem elems
+  where elem (propName,pat)
+            | isEmptyPattern pat = return []
+            | isSingleElementPattern pat = unpackPatternNoExpr pat (referProp e propName)
+            | otherwise = do{ tmpName <- genSym
+                            ; inner <- unpackPatternNoExpr pat (Variable tmpName)
+                            ; return $ (tmpName,referProp e propName):inner
+                            }
+        referProp e (PNIdentifier name) | name `notElem` reservedNames = Field e name
+                                        | otherwise = Index e $ Literal $ StringLiteral $ show name
+        referProp e (PNLiteral lit) = Index e $ Literal lit

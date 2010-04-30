@@ -455,3 +455,15 @@ patternNoExprToExpr :: LHSPatternNoExpr -> LHSPatternExpr
 patternNoExprToExpr (LHSSimple x) = LHSSimple $ Variable x
 patternNoExprToExpr (LHSArray elems) = LHSArray $ map (fmap patternNoExprToExpr) elems
 patternNoExprToExpr (LHSObject elems) = LHSObject $ map (\(n,x) -> (n,patternNoExprToExpr x)) elems
+
+isEmptyPattern (LHSSimple _) = False
+isEmptyPattern (LHSArray elems) = all isEmptyPattern $ catMaybes elems
+isEmptyPattern (LHSObject elems) = all (isEmptyPattern . snd) elems
+
+isSingleElementPattern (LHSSimple _) = True
+isSingleElementPattern (LHSArray elems) = (length $ filter (not . isEmptyPattern) $ catMaybes elems) == 1
+isSingleElementPattern (LHSObject elems) = (length $ filter (not . isEmptyPattern . snd) elems) == 1
+
+isTrivialPattern (LHSSimple _) = True
+isTrivialPattern _ = False
+
