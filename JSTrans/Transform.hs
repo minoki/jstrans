@@ -5,7 +5,7 @@ import Control.Monad.State
 import Char (isDigit)
 import Numeric (readDec)
 import Maybe (maybeToList,isJust,isNothing,fromJust)
-import List (union)
+import List (union,find)
 
 data TransformOptions = TransformOptions
   { transformConditionalCatch :: Bool
@@ -185,25 +185,21 @@ getTransformer options = myTransformer
         = myExpr (FunctionExpression False fn)
     myExpr (Let vars e)
         | transformLetExpression options
-        = do{ let varsWithInitializer = filter (isJust . snd) vars
-                  varsWithNoInitializer = filter (isNothing . snd) vars
+        = do{ vars' <- mapM (\(name,init) -> do{ name2 <- genSym ; return ((name,name2),init) }) vars
+            ; let varsWithInitializer = filter (isJust . snd) vars'
+                  varsWithNoInitializer = filter (isNothing . snd) vars'
             ; varsWithInitializer' <- mapM (\(n,Just e) -> do { e' <- myExpr e
                                                               ; return (n,Just e')
                                                               }) varsWithInitializer
-            ; prevIsInsideImplicitlyCreatedFunction
-                <- getsF isInsideImplicitlyCreatedFunction
-            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
-            ; e' <- myExpr e
-            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
-                                   = prevIsInsideImplicitlyCreatedFunction})
-            ; let body = FunctionBody [Statement $ Return (Just e')]
-            ; return $ FuncCall
-                         (FunctionExpression False
-                            $ makeFunction Nothing
-                                  (map fst $ varsWithInitializer'++varsWithNoInitializer)
-                                  body)
-                         (map (fromJust . snd) varsWithInitializer')
-            }
+            ; let varsWithNoInitializer'
+                      = if null varsWithNoInitializer
+                        then []
+                        else [foldr (\((_,v),_) r -> Assign "=" (LHSSimple $ Variable v) r) undefinedExpr varsWithNoInitializer]
+            ; addInternalVariables (map (\((_,n),_) -> (LHSSimple n,Nothing)) vars')
+            ; let e' = substVariables (map fst vars') e
+            ; return $ foldl1 (Binary ",") $ varsWithNoInitializer' ++ (map (\((_,n),Just v) -> Assign "=" (Variable n) v) varsWithInitializer) ++ [e']
+           }
+      where undefinedExpr = Prefix "void" $ Literal $ NumericLiteral "0"
     myExpr x = transformExpr defaultTransformer x
 
     myStat :: Statement -> TransformerState Statement
@@ -344,3 +340,26 @@ substVar from to = myTransformer
           || Just from == functionName fn
            then return fn
            else transformFunction defaultTransformer fn
+
+substVariables :: CodeFragment a => [(String,String)] -> a -> a
+substVariables subst e = evalState (applyTransformer myTransformer e) ()
+  where
+    substFrom = map fst subst
+    myTransformer,defaultTransformer :: Transformer (State ())
+    myTransformer = defaultTransformer { transformExpr = myExpr
+                                       , transformStat = myStat
+                                       }
+    defaultTransformer = getDefaultTransformer myTransformer
+    ident name = case find (\(from,_) -> name == from) subst of
+                   Just (_,to) -> to
+                   Nothing -> name
+    myExpr (Variable name) = return (Variable $ ident name)
+    myExpr v = transformExpr defaultTransformer v
+    myStat (VarDef kind vars) = do{ vars' <- mapM varDecl vars
+                                  ; return $ VarDef kind vars'
+                                  }
+      where varDecl (name,Just e) = do{ e' <- myExpr e
+                                      ; return (ident name,Just e')
+                                      }
+            varDecl (name,Nothing) = return (ident name,Nothing)
+    myStat s = transformStat defaultTransformer s
