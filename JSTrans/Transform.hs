@@ -196,35 +196,27 @@ getTransformer options = myTransformer
         | transformArrayComprehension options
         = do{ arrayName <- genSym
             ; let arrayVar = Variable arrayName
-            ; prevIsInsideImplicitlyCreatedFunction
-                <- getsF isInsideImplicitlyCreatedFunction
-            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
-            ; let compFor ((kind,varName,objExpr):rest)
-                      = do{ objExpr' <- myExpr objExpr
-                          ; rest' <- compFor rest
-                          ; (if kind == CompForIn then tForIn else tForEach)
-                                  (ForInLHSExpr $ patternNoExprToExpr varName) objExpr' rest'
-                          }
-                  compFor [] = do{ x' <- myExpr x
-                                 ; let p = ExpressionStatement
-                                           $ FuncCall (Field arrayVar "push") [x']
-                                 ; case i of
-                                     Just g -> do{ g' <- myExpr g
-                                                 ; return $ If g' p Nothing }
-                                     Nothing -> return p
-                                 }
-            ; f' <- compFor f
-            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
-                                   = prevIsInsideImplicitlyCreatedFunction})
-            ; def <- tVarDef VariableDefinition
-                     $ (LHSSimple arrayName,Just $ New (Variable "Array") [])
-                           :(map (\(_,n,_) -> (n,Nothing)) f) -- FIXME:pattern
-            ; let body = FunctionBody $ map Statement
-                         [def
-                         ,f'
-                         ,Return (Just arrayVar)
-                         ]
-            ; return $ FuncCall (FunctionExpression False $ makeFunction Nothing [] body) []
+            ; splitIntoFunction [] []
+            $ do{ let compFor ((kind,varName,objExpr):rest)
+                          = do{ objExpr' <- myExpr objExpr
+                              ; rest' <- compFor rest
+                              ; (if kind == CompForIn then tForIn else tForEach)
+                                    (ForInLHSExpr $ patternNoExprToExpr varName) objExpr' rest'
+                              }
+                      compFor [] = do{ x' <- myExpr x
+                                     ; let p = ExpressionStatement
+                                               $ FuncCall (Field arrayVar "push") [x']
+                                     ; case i of
+                                         Just g -> do{ g' <- myExpr g
+                                                     ; return $ If g' p Nothing }
+                                         Nothing -> return p
+                                     }
+                ; f' <- compFor f
+                ; def <- tVarDef VariableDefinition
+                         $ (LHSSimple arrayName,Just $ New (Variable "Array") [])
+                               :(map (\(_,n,_) -> (n,Nothing)) f)
+                ; return [def,f',Return (Just arrayVar)]
+                }
             }
     myExpr (ObjectLiteral elems)
         | transformReservedNameAsIdentifier options
@@ -484,3 +476,14 @@ unpackPattern2 pat e | isSingleElementPattern pat = unpackPattern pat e
                                      ; vars <- unpackPattern pat (Variable name)
                                      ; return $ (Variable name,e):vars
                                      }
+
+splitIntoFunction :: [LHSPatternNoExpr] -> [Expr] -> TransformerState [Statement] -> TransformerState Expr
+splitIntoFunction params args getStatements
+    = do{ prevIsInsideImplicitlyCreatedFunction <- getsF isInsideImplicitlyCreatedFunction
+        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
+        ; statements <- getStatements
+        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
+                                = prevIsInsideImplicitlyCreatedFunction})
+        ; let body = FunctionBody $ map Statement statements
+        ; return $ FuncCall (FunctionExpression False $ makeFunction Nothing params body) args
+        }
