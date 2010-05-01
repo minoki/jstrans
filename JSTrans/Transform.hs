@@ -248,20 +248,35 @@ getTransformer options = myTransformer
         = myExpr (FunctionExpression False fn)
     myExpr (Let vars e)
         | transformLetExpression options
-        = do{ vars' <- mapM (\(LHSSimple name,init) -> do{ name2 <- genSym
-                                               ; return ((name,name2),init)
-                                               }) vars
-            ; let varsWithInitializer = filter (isJust . snd) vars'
-                  varsWithNoInitializer = filter (isNothing . snd) vars'
-            ; varsWithNoInitializer'
-                <- sequence $ if null varsWithNoInitializer
-                              then []
-                              else [foldr (\((_,v),_) r -> r >>= tAssign "=" (LHSSimple $ Variable v)) (return undefinedExpr) varsWithNoInitializer]
-            ; addInternalVariables (map (\((_,n),_) -> (LHSSimple n,Nothing)) vars')
-            ; let e' = substVariables (map fst vars') e
-            ; varsWithInitializer'' <- mapM (\((_,n),Just v) -> tAssign "=" (LHSSimple $ Variable n) v) varsWithInitializer
-            ; return $ foldl1 (Binary ",") $ varsWithNoInitializer' ++ varsWithInitializer'' ++ [e']
-           }
+        = do{ let tVar (LHSSimple name,Nothing)
+                      = do{ name2 <- genSym
+                          ; return ([(name,name2)],Nothing,Just name2)
+                          }
+                  tVar (LHSSimple name,Just init)
+                      = do{ name2 <- genSym
+                          ; return ([(name,name2)],Just (LHSSimple $ Variable name2,init),Nothing)
+                          }
+                  tVar (pat,Just init)
+                      = do{ let names = patternComponents pat
+                          ; names2 <- mapM (const genSym) names
+                          ; let namesSubst = zip names names2
+                          ; let pat' = substVariablesInPattern namesSubst pat
+                          ; return (namesSubst,Just (patternNoExprToExpr pat',init),Nothing)
+                          }
+            ; (subst',init',uninitialized') <- liftM unzip3 $ mapM tVar vars
+            ; let subst = concat subst'
+                  init = catMaybes init'
+                  uninitialized = catMaybes uninitialized'
+            ; initializers <- mapM (uncurry $ tAssign "=") init
+            ; initializers
+                <- if null uninitialized
+                   then return initializers
+                   else liftM (:initializers) (foldr (\v -> (tAssign "=" (LHSSimple $ Variable v) =<<)) (return undefinedExpr) uninitialized)
+            ; e' <- myExpr $ substVariables subst e
+            ; let expressions = initializers++[e']
+            ; addInternalVariables $ map (\(_,n) -> (LHSSimple n,Nothing)) subst
+            ; return $ foldl1 (Binary ",") expressions
+            }
       where undefinedExpr = Prefix "void" $ Literal $ NumericLiteral "0"
     myExpr (Assign op pat rhs) = tAssign op pat rhs
     myExpr x = transformExpr defaultTransformer x
@@ -432,6 +447,16 @@ substVariables subst e = evalState (applyTransformer myTransformer e) ()
                                       }
             varDecl (name,Nothing) = return (patternNoExpr name,Nothing)
     myStat s = transformStat defaultTransformer s
+
+substVariablesInPattern :: [(String,String)] -> LHSPatternNoExpr -> LHSPatternNoExpr
+substVariablesInPattern subst pat = pattern pat
+  where
+    ident name = case find (\(from,_) -> name == from) subst of
+                   Just (_,to) -> to
+                   Nothing -> name
+    pattern (LHSSimple name) = LHSSimple name
+    pattern (LHSArray elems) = LHSArray $ map (fmap pattern) elems
+    pattern (LHSObject elems) = LHSObject $ map (\(k,v) -> (k,pattern v)) elems
 
 unpackPattern :: PatternFromIdentifier a => LHSPattern a -> Expr -> TransformerState [(a,Expr)]
 unpackPattern (LHSSimple lhs) e = return [(lhs,e)]
