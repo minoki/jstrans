@@ -209,7 +209,7 @@ getTransformer options = myTransformer
         = if isEmptyPattern pat
           then return rhs
           else do{ counter1 <- gets genSymCounter
-                 ; vars <- unpackPattern pat rhs
+                 ; vars <- unpackPattern2 pat rhs
                  ; counter2 <- gets genSymCounter
                  ; addInternalVariables $ map (\n -> (LHSSimple ('$':show n),Nothing)) [counter1..counter2-1]
                  ; return $ foldl1 (Binary ",") $ map (\(lhs,rhs) -> Assign "=" (LHSSimple lhs) rhs) vars
@@ -404,3 +404,9 @@ unpackPattern (LHSObject elems) e = liftM concat $ sequence $ map elem elems
         referProp e (PNIdentifier name) | name `notElem` reservedNames = Field e name
                                         | otherwise = Index e $ Literal $ StringLiteral $ show name
         referProp e (PNLiteral lit) = Index e $ Literal lit
+
+unpackPattern2 pat e | isSingleElementPattern pat = unpackPattern pat e
+                     | otherwise = do{ name <- genSym
+                                     ; vars <- unpackPattern pat (Variable name)
+                                     ; return $ (Variable name,e):vars
+                                     }
