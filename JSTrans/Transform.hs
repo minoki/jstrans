@@ -23,14 +23,29 @@ data TransformOptions = TransformOptions
 
 identifierToStringLiteral = StringLiteral . show
 
+data FunctionContext
+    = FunctionContext
+      { aliasForThis :: Maybe String
+      , aliasForArguments :: Maybe String
+      , isInsideImplicitlyCreatedFunction :: Bool
+      , isGlobal :: Bool
+      }
+
 data TransformerData
     = TransformerData
       { genSymCounter :: Int
-      , aliasForThis :: Maybe String
-      , aliasForArguments :: Maybe String
-      , isInsideImplicitlyCreatedFunction :: Bool
+      , functionContext :: FunctionContext
       }
 type TransformerState = State TransformerData
+
+emptyFunctionContext = FunctionContext { aliasForThis = Nothing
+                                       , aliasForArguments = Nothing
+                                       , isInsideImplicitlyCreatedFunction = False
+                                       , isGlobal = False
+                                       }
+
+getsF f = gets (f . functionContext)
+modifyF f = modify (\s -> s { functionContext = f (functionContext s) })
 
 genSym :: TransformerState String
 genSym = do{ n <- gets genSymCounter
@@ -45,9 +60,7 @@ transformProgram options p = evalState (AST.transformProgram transformer p) init
     Program statements = p
     initialN = 1+scanInternalIdentifierUse statements
     initialState = TransformerData { genSymCounter = initialN
-                                   , aliasForThis = Nothing
-                                   , aliasForArguments = Nothing
-                                   , isInsideImplicitlyCreatedFunction = False
+                                   , functionContext = emptyFunctionContext { isGlobal = True }
                                    }
 
 
@@ -78,28 +91,28 @@ getTransformer options = myTransformer
     defaultTransformer = getDefaultTransformer myTransformer
     myExpr :: Expr -> TransformerState Expr
     myExpr v@(Variable "arguments")
-        = do{ f <- gets isInsideImplicitlyCreatedFunction
+        = do{ f <- getsF isInsideImplicitlyCreatedFunction
             ; if f
-               then do{ w <- gets aliasForArguments
+               then do{ w <- getsF aliasForArguments
                       ; case w of
                           Just name -> return $ Variable name
                           Nothing ->
                               do{ name <- genSym
-                                ; modify (\s -> s {aliasForArguments = Just name})
+                                ; modifyF (\s -> s {aliasForArguments = Just name})
                                 ; return $ Variable name
                                 }
                       }
                else return v
             }
     myExpr v@This
-        = do{ f <- gets isInsideImplicitlyCreatedFunction
+        = do{ f <- getsF isInsideImplicitlyCreatedFunction
             ; if f
-               then do{ w <- gets aliasForThis
+               then do{ w <- getsF aliasForThis
                       ; case w of
                           Just name -> return $ Variable name
                           Nothing ->
                               do{ name <- genSym
-                                ; modify (\s -> s {aliasForThis = Just name})
+                                ; modifyF (\s -> s {aliasForThis = Just name})
                                 ; return $ Variable name
                                 }
                       }
@@ -116,8 +129,8 @@ getTransformer options = myTransformer
         = do{ arrayName <- genSym
             ; let arrayVar = Variable arrayName
             ; prevIsInsideImplicitlyCreatedFunction
-                <- gets isInsideImplicitlyCreatedFunction
-            ; modify (\s -> s {isInsideImplicitlyCreatedFunction = True})
+                <- getsF isInsideImplicitlyCreatedFunction
+            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
             ; let compFor ((kind,varName,objExpr):rest)
                       = do{ objExpr' <- myExpr objExpr
                           ; rest' <- compFor rest
@@ -134,7 +147,7 @@ getTransformer options = myTransformer
                                      Nothing -> return p
                                  }
             ; f' <- compFor f
-            ; modify (\s -> s {isInsideImplicitlyCreatedFunction
+            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
                                    = prevIsInsideImplicitlyCreatedFunction})
             ; let body = FunctionBody $ map Statement
                          [VarDef VariableDefinition
@@ -173,10 +186,10 @@ getTransformer options = myTransformer
                                                               ; return (n,Just e')
                                                               }) varsWithInitializer
             ; prevIsInsideImplicitlyCreatedFunction
-                <- gets isInsideImplicitlyCreatedFunction
-            ; modify (\s -> s {isInsideImplicitlyCreatedFunction = True})
+                <- getsF isInsideImplicitlyCreatedFunction
+            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
             ; e' <- myExpr e
-            ; modify (\s -> s {isInsideImplicitlyCreatedFunction
+            ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
                                    = prevIsInsideImplicitlyCreatedFunction})
             ; let body = FunctionBody [Statement $ Return (Just e')]
             ; return $ FuncCall
@@ -240,17 +253,11 @@ getTransformer options = myTransformer
     myFuncDecl name x = transformFuncDecl defaultTransformer name x
 
     myFunction :: Function -> TransformerState Function
-    myFunction fn = do{ prevAliasForThis <- gets aliasForThis
-                      ; prevAliasForArguments <- gets aliasForArguments
-                      ; prevIsInsideImplicitlyCreatedFunction
-                          <- gets isInsideImplicitlyCreatedFunction
-                      ; modify (\s -> s { aliasForThis = Nothing
-                                        , aliasForArguments = Nothing
-                                        , isInsideImplicitlyCreatedFunction = False
-                                        })
+    myFunction fn = do{ outer <- getsF id
+                      ; modifyF (const emptyFunctionContext)
                       ; fn' <- transformFunction defaultTransformer fn
-                      ; aliasForThis' <- gets aliasForThis
-                      ; aliasForArguments' <- gets aliasForArguments
+                      ; aliasForThis' <- getsF aliasForThis
+                      ; aliasForArguments' <- getsF aliasForArguments
                       ; let internalVars
                                 = (maybe [] (\s -> [(s,Just This)]) aliasForThis')
                                   ++ (maybe [] (\s -> [(s,Just (Variable "arguments"))])
@@ -264,11 +271,7 @@ getTransformer options = myTransformer
                                             (case functionBody fn' of
                                                FunctionBody body
                                                    -> FunctionBody ((Statement $ VarDef VariableDefinition internalVars):body))
-                      ; modify (\s -> s { aliasForThis = prevAliasForThis
-                                        , aliasForArguments = prevAliasForArguments
-                                        , isInsideImplicitlyCreatedFunction
-                                            = prevIsInsideImplicitlyCreatedFunction
-                                        })
+                      ; modifyF (const outer)
                       ; return fn''
                       }
 
