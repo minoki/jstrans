@@ -94,6 +94,69 @@ getTransformer options = myTransformer
                              , transformFunction = myFunction
                              }
     defaultTransformer = getDefaultTransformer myTransformer
+
+    tAssign :: Operator -> LHSPatternExpr -> Expr -> TransformerState Expr
+    tAssign "=" pat rhs
+        | transformDestructuringAssignment options && not (isTrivialPattern pat)
+        = if isEmptyPattern pat
+          then myExpr rhs
+          else do{ counter1 <- gets genSymCounter
+                 ; vars <- unpackPattern2 pat rhs
+                 ; counter2 <- gets genSymCounter
+                 ; addInternalVariables $ map (\n -> (LHSSimple ('$':show n),Nothing)) [counter1..counter2-1]
+                 ; vars' <- mapM (\(lhs,rhs) -> tAssign "=" (LHSSimple lhs) rhs) vars
+                 ; return $ foldl1 (Binary ",") vars'
+                 }
+    tAssign op pat rhs = do{ rhs <- myExpr rhs
+                          ; return $ Assign op pat rhs
+                          }
+    tVarDef kind variables
+        = do{ variables <- mapM varDef1 variables
+            ; return $ VarDef kind variables
+            }
+      where varDef1 (pat,Just rhs) = do{ rhs <- myExpr rhs
+                                       ; return (pat,Just rhs)
+                                       }
+            varDef1 (pat,Nothing) = return (pat,Nothing)
+    tForIn head o body -- FIXME: head
+        = do{ body <- myStat body
+            ; o <- myExpr o
+            ; return $ ForIn head o body
+            }
+    tForEach (ForInLHSExpr lhs) o body
+        | transformForEach options
+        = do{ objName <- genSym
+            ; keyName <- genSym
+            ; def <- tVarDef VariableDefinition [(LHSSimple objName,Just o)]
+            ; a <- tAssign "=" lhs $ Index (Variable objName) (Variable keyName)
+            ; return (BlockStatement
+                      $ Block [def
+                              ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
+                                     (Variable objName)
+                                     (BlockStatement
+                                      $ Block [ExpressionStatement a,body])])
+            }
+    tForEach (ForInVarDef kind valName init) o body
+        | transformForEach options
+        = do{ objName <- genSym
+            ; keyName <- genSym
+            ; def <- tVarDef VariableDefinition [(LHSSimple objName,Just o)]
+            ; def2 <- tVarDef kind [(valName,init)]
+            ; a <- tAssign "=" (patternNoExprToExpr valName) $ Index (Variable objName) (Variable keyName)
+            ; return (BlockStatement
+                      $ Block [def
+                              ,def2
+                              ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
+                                     (Variable objName)
+                                     (BlockStatement
+                                      $ Block [ExpressionStatement a,body])])
+            }
+    tForEach head o body -- FIXME: head
+        = do{ body <- myStat body
+            ; o <- myExpr o
+            ; return $ ForEach head o body
+            }
+
     myExpr :: Expr -> TransformerState Expr
     myExpr v@(Variable "arguments")
         = do{ f <- getsF isInsideImplicitlyCreatedFunction
@@ -139,8 +202,7 @@ getTransformer options = myTransformer
             ; let compFor ((kind,varName,objExpr):rest)
                       = do{ objExpr' <- myExpr objExpr
                           ; rest' <- compFor rest
-                          ; return
-                            $ (if kind == CompForIn then ForIn else ForEach)
+                          ; (if kind == CompForIn then tForIn else tForEach)
                                   (ForInLHSExpr $ patternNoExprToExpr varName) objExpr' rest'
                           }
                   compFor [] = do{ x' <- myExpr x
@@ -154,10 +216,11 @@ getTransformer options = myTransformer
             ; f' <- compFor f
             ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
                                    = prevIsInsideImplicitlyCreatedFunction})
+            ; def <- tVarDef VariableDefinition
+                     $ (LHSSimple arrayName,Just $ New (Variable "Array") [])
+                           :(map (\(_,n,_) -> (n,Nothing)) f) -- FIXME:pattern
             ; let body = FunctionBody $ map Statement
-                         [VarDef VariableDefinition
-                                     $ (LHSSimple arrayName,Just $ New (Variable "Array") [])
-                                           :(map (\(_,n,_) -> (n,Nothing)) f) -- TODO: apply transformations to this
+                         [def
                          ,f'
                          ,Return (Just arrayVar)
                          ]
@@ -190,28 +253,17 @@ getTransformer options = myTransformer
                                                }) vars
             ; let varsWithInitializer = filter (isJust . snd) vars'
                   varsWithNoInitializer = filter (isNothing . snd) vars'
-            ; varsWithInitializer' <- mapM (\(n,Just e) -> do { e' <- myExpr e
-                                                              ; return (n,Just e')
-                                                              }) varsWithInitializer
-            ; let varsWithNoInitializer'
-                      = if null varsWithNoInitializer
-                        then []
-                        else [foldr (\((_,v),_) r -> Assign "=" (LHSSimple $ Variable v) r) undefinedExpr varsWithNoInitializer]
+            ; varsWithNoInitializer'
+                <- sequence $ if null varsWithNoInitializer
+                              then []
+                              else [foldr (\((_,v),_) r -> r >>= tAssign "=" (LHSSimple $ Variable v)) (return undefinedExpr) varsWithNoInitializer]
             ; addInternalVariables (map (\((_,n),_) -> (LHSSimple n,Nothing)) vars')
             ; let e' = substVariables (map fst vars') e
-            ; return $ foldl1 (Binary ",") $ varsWithNoInitializer' ++ (map (\((_,n),Just v) -> Assign "=" (LHSSimple $ Variable n) v) varsWithInitializer) ++ [e']
+            ; varsWithInitializer'' <- mapM (\((_,n),Just v) -> tAssign "=" (LHSSimple $ Variable n) v) varsWithInitializer
+            ; return $ foldl1 (Binary ",") $ varsWithNoInitializer' ++ varsWithInitializer'' ++ [e']
            }
       where undefinedExpr = Prefix "void" $ Literal $ NumericLiteral "0"
-    myExpr (Assign op pat rhs)
-        | transformDestructuringAssignment options && not (isTrivialPattern pat) && op == "="
-        = if isEmptyPattern pat
-          then return rhs
-          else do{ counter1 <- gets genSymCounter
-                 ; vars <- unpackPattern2 pat rhs
-                 ; counter2 <- gets genSymCounter
-                 ; addInternalVariables $ map (\n -> (LHSSimple ('$':show n),Nothing)) [counter1..counter2-1]
-                 ; return $ foldl1 (Binary ",") $ map (\(lhs,rhs) -> Assign "=" (LHSSimple lhs) rhs) vars
-                 }
+    myExpr (Assign op pat rhs) = tAssign op pat rhs
     myExpr x = transformExpr defaultTransformer x
 
     myStat :: Statement -> TransformerState Statement
@@ -235,32 +287,7 @@ getTransformer options = myTransformer
                                                  (Just (cc xs))-} -- FIXME
               in myStat (Try b [] (Just (LHSSimple varName,Block [cc c])) f)
             }
-    myStat (ForEach (ForInLHSExpr lhs) o body)
-        | transformForEach options
-        = do{ objName <- genSym
-            ; keyName <- genSym
-            ; o' <- myExpr o
-            ; return (BlockStatement
-                      $ Block [VarDef VariableDefinition [(LHSSimple objName,Just o')]
-                              ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
-                                     (Variable objName)
-                                     (BlockStatement
-                                      $ Block [ExpressionStatement (Assign "=" lhs (Variable keyName)),body])])
-            }
-    myStat (ForEach (ForInVarDef kind valName init) o body)
-        | transformForEach options
-        = do{ objName <- genSym
-            ; keyName <- genSym
-            ; o' <- myExpr o
-            ; return (BlockStatement
-                      $ Block
-                            [VarDef VariableDefinition [(LHSSimple objName,Just o')]
-                            ,VarDef kind [(valName,init)] -- FIXME: be recursive
-                            ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
-                                   (Variable objName)
-                                   (BlockStatement
-                                    $ Block [ExpressionStatement (Assign "=" (patternNoExprToExpr valName) (Variable keyName)),body])])
-            }
+    myStat (ForEach head o body) = tForEach head o body
     myStat x = transformStat defaultTransformer x
 
     myBlock :: Block -> TransformerState Block
