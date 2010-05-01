@@ -259,9 +259,8 @@ getTransformer options = myTransformer
     myFunction :: Function -> TransformerState Function
     myFunction fn = do{ outer <- getsF id
                       ; modifyF (const emptyFunctionContext)
-                      ; args <- (if transformDestructuringAssignment options
-                                 then mapM transformFunctionArgument
-                                 else return) (functionArguments fn)
+                      ; (args,internalVars')
+                          <- liftM unzip $ mapM transformFunctionArgument $ functionArguments fn
                       ; fn' <- transformFunction defaultTransformer (fn { functionArguments = args })
                       ; aliasForThis' <- getsF aliasForThis
                       ; aliasForArguments' <- getsF aliasForArguments
@@ -269,8 +268,9 @@ getTransformer options = myTransformer
                                 = (maybe [] (\s -> [(LHSSimple s,Just This)]) aliasForThis')
                                   ++ (maybe [] (\s -> [(LHSSimple s,Just (Variable "arguments"))])
                                             aliasForArguments')
+                                  ++ concat internalVars'
                       ; let fn''
-                                = if null internalVars
+                                = if null internalVars'
                                    then fn'
                                    else makeFunction
                                             (functionName fn')
@@ -282,12 +282,17 @@ getTransformer options = myTransformer
                       ; return fn''
                       }
 
-    transformFunctionArgument pat@(LHSSimple _) = return pat
-    transformFunctionArgument pat = do{ name <- genSym
-                                      ; l <- unpackPatternNoExpr pat (Variable name)
-                                      ; mapM_ addInternalVariable $ map (\(n,x) -> (n,Just x)) l
-                                      ; return (Variable name)
-                                      }
+    transformFunctionArgument pat@(LHSSimple _)
+        = return (pat,[])
+    transformFunctionArgument pat
+        | transformDestructuringAssignment options
+        = do{ name <- genSym
+            ; vars <- unpackPatternNoExpr pat (Variable name)
+            ; return (LHSSimple name,map (\(n,x) -> (LHSSimple n,Just x)) vars)
+            }
+    transformFunctionArgument pat
+        | not $ transformDestructuringAssignment options
+        = return (pat,[])
 
 scanInternalIdentifierUse :: [SourceElement] -> Int
 scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVisitor) code
