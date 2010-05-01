@@ -287,7 +287,7 @@ getTransformer options = myTransformer
     transformFunctionArgument pat
         | transformDestructuringAssignment options
         = do{ name <- genSym
-            ; vars <- unpackPatternNoExpr pat (Variable name)
+            ; vars <- unpackPattern pat (Variable name)
             ; return (LHSSimple name,map (\(n,x) -> (LHSSimple n,Just x)) vars)
             }
     transformFunctionArgument pat
@@ -364,25 +364,25 @@ substVar from to = myTransformer
            else transformFunction defaultTransformer fn
 
 
-unpackPatternNoExpr :: LHSPatternNoExpr -> Expr -> TransformerState [(String,Expr)]
-unpackPatternNoExpr (LHSSimple name) e = return [(name,e)]
-unpackPatternNoExpr (LHSArray elems) e = liftM concat $ sequence $ zipWith elem elems [0..]
+unpackPattern :: PatternFromIdentifier a => LHSPattern a -> Expr -> TransformerState [(a,Expr)]
+unpackPattern (LHSSimple lhs) e = return [(lhs,e)]
+unpackPattern (LHSArray elems) e = liftM concat $ sequence $ zipWith elem elems [0..]
   where elem Nothing _ = return []
         elem (Just pat) i
             | isEmptyPattern pat = return []
-            | isSingleElementPattern pat = unpackPatternNoExpr pat (referIndex e i)
+            | isSingleElementPattern pat = unpackPattern pat (referIndex e i)
             | otherwise = do{ tmpName <- genSym
-                            ; inner <- unpackPatternNoExpr pat (Variable tmpName)
-                            ; return $ (tmpName,referIndex e i):inner
+                            ; inner <- unpackPattern pat (Variable tmpName)
+                            ; return $ (patternFromIdentifier tmpName,referIndex e i):inner
                             }
         referIndex e i = Index e $ Literal $ NumericLiteral $ show i
-unpackPatternNoExpr (LHSObject elems) e = liftM concat $ sequence $ map elem elems
+unpackPattern (LHSObject elems) e = liftM concat $ sequence $ map elem elems
   where elem (propName,pat)
             | isEmptyPattern pat = return []
-            | isSingleElementPattern pat = unpackPatternNoExpr pat (referProp e propName)
+            | isSingleElementPattern pat = unpackPattern pat (referProp e propName)
             | otherwise = do{ tmpName <- genSym
-                            ; inner <- unpackPatternNoExpr pat (Variable tmpName)
-                            ; return $ (tmpName,referProp e propName):inner
+                            ; inner <- unpackPattern pat (Variable tmpName)
+                            ; return $ (patternFromIdentifier tmpName,referProp e propName):inner
                             }
         referProp e (PNIdentifier name) | name `notElem` reservedNames = Field e name
                                         | otherwise = Index e $ Literal $ StringLiteral $ show name
