@@ -5,7 +5,7 @@ import Control.Monad.State
 import Char (isDigit)
 import Numeric (readDec)
 import Maybe (maybeToList,isJust,isNothing,fromJust,catMaybes)
-import List (union,find)
+import List (union,find,intersect,partition)
 
 data TransformOptions = TransformOptions
   { transformConditionalCatch :: Bool
@@ -240,34 +240,45 @@ getTransformer options = myTransformer
         = myExpr (FunctionExpression False fn)
     myExpr (Let vars e)
         | transformLetExpression options
-        = do{ let tVar (LHSSimple name,Nothing)
-                      = do{ name2 <- genSym
-                          ; return ([(name,name2)],Nothing,Just name2)
-                          }
-                  tVar (LHSSimple name,Just init)
-                      = do{ name2 <- genSym
-                          ; return ([(name,name2)],Just (LHSSimple $ Variable name2,init),Nothing)
-                          }
-                  tVar (pat,Just init)
-                      = do{ let names = patternComponents pat
-                          ; names2 <- mapM (const genSym) names
-                          ; let namesSubst = zip names names2
-                          ; let pat' = substVariablesInPattern namesSubst pat
-                          ; return (namesSubst,Just (patternNoExprToExpr pat',init),Nothing)
-                          }
-            ; (subst',init',uninitialized') <- liftM unzip3 $ mapM tVar vars
-            ; let subst = concat subst'
-                  init = catMaybes init'
-                  uninitialized = catMaybes uninitialized'
-            ; initializers <- mapM (uncurry $ tAssign "=") init
-            ; initializers
-                <- if null uninitialized
-                   then return initializers
-                   else liftM (:initializers) (foldr (\v -> (tAssign "=" (LHSSimple $ Variable v) =<<)) (return undefinedExpr) uninitialized)
-            ; e' <- myExpr $ substVariables subst e
-            ; let expressions = initializers++[e']
-            ; addInternalVariables $ map (\(_,n) -> (LHSSimple n,Nothing)) subst
-            ; return $ foldl1 (Binary ",") expressions
+        = do{ let usedVariables = variablesUsedInInternalFunctions e
+            ; let definedVariables = concatMap (patternComponents . fst) vars
+            ; if null $ intersect usedVariables definedVariables
+              then
+                do{ let tVar (LHSSimple name,Nothing)
+                            = do{ name2 <- genSym
+                                ; return ([(name,name2)],Nothing,Just name2)
+                                }
+                        tVar (LHSSimple name,Just init)
+                            = do{ name2 <- genSym
+                                ; return ([(name,name2)],Just (LHSSimple $ Variable name2,init),Nothing)
+                                }
+                        tVar (pat,Just init)
+                            = do{ let names = patternComponents pat
+                                ; names2 <- mapM (const genSym) names
+                                ; let namesSubst = zip names names2
+                                ; let pat' = substVariablesInPattern namesSubst pat
+                                ; return (namesSubst,Just (patternNoExprToExpr pat',init),Nothing)
+                                }
+                  ; (subst',init',uninitialized') <- liftM unzip3 $ mapM tVar vars
+                  ; let subst = concat subst'
+                        init = catMaybes init'
+                        uninitialized = catMaybes uninitialized'
+                  ; initializers <- mapM (uncurry $ tAssign "=") init
+                  ; initializers
+                      <- if null uninitialized
+                         then return initializers
+                         else liftM (:initializers) (foldr (\v -> (tAssign "=" (LHSSimple $ Variable v) =<<)) (return undefinedExpr) uninitialized)
+                  ; e' <- myExpr $ substVariables subst e
+                  ; let expressions = initializers++[e']
+                  ; addInternalVariables $ map (\(_,n) -> (LHSSimple n,Nothing)) subst
+                  ; return $ foldl1 (Binary ",") expressions
+                  }
+              else
+                let (init,uninit) = partition (isJust . snd) vars
+                in splitIntoFunction (map fst $ init++uninit) (map (fromJust . snd) init)
+                       $ do{ e' <- myExpr e
+                           ; return [Return $ Just e']
+                           }
             }
       where undefinedExpr = Prefix "void" $ Literal $ NumericLiteral "0"
     myExpr (Assign op pat rhs) = tAssign op pat rhs
