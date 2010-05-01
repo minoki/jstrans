@@ -259,7 +259,10 @@ getTransformer options = myTransformer
     myFunction :: Function -> TransformerState Function
     myFunction fn = do{ outer <- getsF id
                       ; modifyF (const emptyFunctionContext)
-                      ; fn' <- transformFunction defaultTransformer fn
+                      ; args <- (if transformDestructuringAssignment options
+                                 then mapM transformFunctionArgument
+                                 else return) (functionArguments fn)
+                      ; fn' <- transformFunction defaultTransformer (fn { functionArguments = args })
                       ; aliasForThis' <- getsF aliasForThis
                       ; aliasForArguments' <- getsF aliasForArguments
                       ; let internalVars
@@ -279,6 +282,12 @@ getTransformer options = myTransformer
                       ; return fn''
                       }
 
+    transformFunctionArgument pat@(LHSSimple _) = return pat
+    transformFunctionArgument pat = do{ name <- genSym
+                                      ; l <- unpackPatternNoExpr pat (Variable name)
+                                      ; mapM_ addInternalVariable $ map (\(n,x) -> (n,Just x)) l
+                                      ; return (Variable name)
+                                      }
 
 scanInternalIdentifierUse :: [SourceElement] -> Int
 scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVisitor) code
