@@ -199,6 +199,22 @@ getTransformer options = myTransformer
                                   body)
                          (map (fromJust . snd) varsWithInitializer')
             }
+    myExpr (Assign op pat rhs)
+        | transformDestructuringAssignment options && not (isTrivialPattern pat) && op == "="
+        = if isEmptyPattern pat
+          then return rhs
+          else if isSingleElementPattern pat
+          then do{ [(lhs',rhs')] <- unpackPattern pat rhs
+                 ; return $ Assign op (LHSSimple lhs') rhs'
+                 }
+          else do{ counter1 <- gets genSymCounter
+                 ; name <- genSym
+                 ; vars <- unpackPattern pat (Variable name)
+                 ; counter2 <- gets genSymCounter
+                 ; let vars' = (Variable name,rhs):vars
+                 ; mapM_ addInternalVariable $ map (\n -> ('$':show n,Nothing)) [counter1..counter2-1]
+                 ; return $ foldl1 (Binary ",") $ map (\(lhs,rhs) -> Assign "=" (LHSSimple lhs) rhs) vars'
+                 }
     myExpr x = transformExpr defaultTransformer x
 
     myStat :: Statement -> TransformerState Statement
