@@ -234,6 +234,8 @@ assignmentExprBase
                    ; op <- assignmentOperator
                    ; return (lhs,op)
                    } 
+        ; when (not (isTrivialPattern lhs) && op /= "=")
+                   $ unexpected "SyntaxError: destructuring assignment must be followed by '='"
         ; rhs <- assignmentExprBase
         ; return $ Assign (operatorForName op) lhs rhs
         }
@@ -298,6 +300,8 @@ varStatement = do{ defKind <- definition
 varDeclarationBase
     = do{ name <- patternNoExpr
         ; init <- option' (reservedOp "=" >> assignmentExprBase)
+        ; when (not (isTrivialPattern name) && init == Nothing)
+                   $ unexpected "SyntaxError: destructuring declaration must be followed by '='"
         ; return (name,init)
         }
 varDeclaration = allowIn varDeclarationBase
