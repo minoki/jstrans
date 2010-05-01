@@ -185,7 +185,9 @@ getTransformer options = myTransformer
         = myExpr (FunctionExpression False fn)
     myExpr (Let vars e)
         | transformLetExpression options
-        = do{ vars' <- mapM (\(name,init) -> do{ name2 <- genSym ; return ((name,name2),init) }) vars
+        = do{ vars' <- mapM (\(LHSSimple name,init) -> do{ name2 <- genSym
+                                               ; return ((name,name2),init)
+                                               }) vars
             ; let varsWithInitializer = filter (isJust . snd) vars'
                   varsWithNoInitializer = filter (isNothing . snd) vars'
             ; varsWithInitializer' <- mapM (\(n,Just e) -> do { e' <- myExpr e
@@ -197,7 +199,7 @@ getTransformer options = myTransformer
                         else [foldr (\((_,v),_) r -> Assign "=" (LHSSimple $ Variable v) r) undefinedExpr varsWithNoInitializer]
             ; addInternalVariables (map (\((_,n),_) -> (LHSSimple n,Nothing)) vars')
             ; let e' = substVariables (map fst vars') e
-            ; return $ foldl1 (Binary ",") $ varsWithNoInitializer' ++ (map (\((_,n),Just v) -> Assign "=" (Variable n) v) varsWithInitializer) ++ [e']
+            ; return $ foldl1 (Binary ",") $ varsWithNoInitializer' ++ (map (\((_,n),Just v) -> Assign "=" (LHSSimple $ Variable n) v) varsWithInitializer) ++ [e']
            }
       where undefinedExpr = Prefix "void" $ Literal $ NumericLiteral "0"
     myExpr (Assign op pat rhs)
@@ -388,15 +390,20 @@ substVariables subst e = evalState (applyTransformer myTransformer e) ()
     ident name = case find (\(from,_) -> name == from) subst of
                    Just (_,to) -> to
                    Nothing -> name
+    pattern f (LHSSimple name) = LHSSimple name
+    pattern f (LHSArray elems) = LHSArray $ map (fmap (pattern f)) elems
+    pattern f (LHSObject elems) = LHSObject $ map (\(k,v) -> (k,pattern f v)) elems
+    patternNoExpr = pattern ident
+    patternExpr = pattern myExpr
     myExpr (Variable name) = return (Variable $ ident name)
     myExpr v = transformExpr defaultTransformer v
     myStat (VarDef kind vars) = do{ vars' <- mapM varDecl vars
                                   ; return $ VarDef kind vars'
                                   }
       where varDecl (name,Just e) = do{ e' <- myExpr e
-                                      ; return (ident name,Just e')
+                                      ; return (patternNoExpr name,Just e')
                                       }
-            varDecl (name,Nothing) = return (ident name,Nothing)
+            varDecl (name,Nothing) = return (patternNoExpr name,Nothing)
     myStat s = transformStat defaultTransformer s
 
 unpackPattern :: PatternFromIdentifier a => LHSPattern a -> Expr -> TransformerState [(a,Expr)]
