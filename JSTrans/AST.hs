@@ -445,6 +445,16 @@ scanUsedVar x = fst $ flip execState ([],[]) $ applyVisitor myVisitor x
                         `union` maybeToList (functionName fn))
           $ visitFunction defaultVisitor fn
 
+-- Scans variables used in internal functions
+variablesUsedInInternalFunctions :: CodeFragment a => a -> [String]
+variablesUsedInInternalFunctions x = flip execState [] $ applyVisitor myVisitor x
+  where
+    myVisitor,defaultVisitor :: Visitor (State [String]{-usedVariables-})
+    myVisitor = defaultVisitor { visitFunction = myFunction
+                               }
+    defaultVisitor = getDefaultVisitor myVisitor
+    myFunction fn = modify (\s -> s ++ outerVariables fn)
+
 
 patternComponents :: LHSPattern a -> [a]
 patternComponents (LHSSimple x) = [x]

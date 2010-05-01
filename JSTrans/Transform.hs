@@ -292,13 +292,13 @@ getTransformer options = myTransformer
             ; let
                   cc [] = case uc of
                             Nothing -> (Throw (Variable varName))
-                            Just (LHSSimple n,x) -> BlockStatement (substVarInBlock x n varName)
-                            Just (pat,x) -> undefined {-BlockStatement (substVarInBlock x n varName)-}
-                  cc ((LHSSimple n,e,x):xs) = If (substVarInExpr e n varName)
-                                                 (BlockStatement (substVarInBlock x n varName))
+                            Just (LHSSimple n,x) -> BlockStatement (substVariable n varName x)
+                            Just (pat,x) -> undefined {-BlockStatement (substVariable n varName x)-}
+                  cc ((LHSSimple n,e,x):xs) = If (substVariable n varName e)
+                                                 (BlockStatement (substVariable n varName x))
                                                  (Just (cc xs))
-                  cc ((n,e,x):xs) = undefined {-If (substVarInExpr e n varName)
-                                                 (BlockStatement (substVarInBlock x n varName))
+                  cc ((n,e,x):xs) = undefined {-If (substVariable n varName e)
+                                                 (BlockStatement (substVariable n varName x))
                                                  (Just (cc xs))-} -- FIXME
               in myStat (Try b [] (Just (LHSSimple varName,Block [cc c])) f)
             }
@@ -384,11 +384,8 @@ scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVis
             ; visitFunction defaultVisitor fn
             }
 
-substVarInExpr :: Expr -> String -> String -> Expr
-substVarInExpr e from to = evalState (transformExpr (substVar from to) e) ()
-substVarInBlock :: Block -> String -> String -> Block
-substVarInBlock e from to = evalState (transformBlock (substVar from to) e) ()
-substVar from to = myTransformer
+substVariable :: CodeFragment a => String -> String -> a -> a
+substVariable from to code = evalState (applyTransformer myTransformer code) ()
   where
     myTransformer,defaultTransformer :: Transformer (State ())
     myTransformer = defaultTransformer { transformExpr = myExpr
@@ -421,7 +418,7 @@ substVar from to = myTransformer
            else transformFunction defaultTransformer fn
 
 substVariables :: CodeFragment a => [(String,String)] -> a -> a
-substVariables subst e = evalState (applyTransformer myTransformer e) ()
+substVariables subst code = evalState (applyTransformer myTransformer code) ()
   where
     substFrom = map fst subst
     myTransformer,defaultTransformer :: Transformer (State ())
