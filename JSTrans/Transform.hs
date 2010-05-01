@@ -29,6 +29,7 @@ data FunctionContext
       , aliasForArguments :: Maybe String
       , isInsideImplicitlyCreatedFunction :: Bool
       , isGlobal :: Bool
+      , internalVariables :: [(LHSPattern String,Maybe Expr)]
       }
 
 data TransformerData
@@ -42,7 +43,11 @@ emptyFunctionContext = FunctionContext { aliasForThis = Nothing
                                        , aliasForArguments = Nothing
                                        , isInsideImplicitlyCreatedFunction = False
                                        , isGlobal = False
+                                       , internalVariables = []
                                        }
+
+addInternalVariables :: [(LHSPattern String,Maybe Expr)] -> TransformerState ()
+addInternalVariables variables = modifyF (\s -> s { internalVariables = internalVariables s ++ variables })
 
 getsF f = gets (f . functionContext)
 modifyF f = modify (\s -> s { functionContext = f (functionContext s) })
@@ -280,13 +285,15 @@ getTransformer options = myTransformer
                       ; fn' <- transformFunction defaultTransformer (fn { functionArguments = args })
                       ; aliasForThis' <- getsF aliasForThis
                       ; aliasForArguments' <- getsF aliasForArguments
+                      ; internalVars'' <- getsF internalVariables
                       ; let internalVars
                                 = (maybe [] (\s -> [(LHSSimple s,Just This)]) aliasForThis')
                                   ++ (maybe [] (\s -> [(LHSSimple s,Just (Variable "arguments"))])
                                             aliasForArguments')
                                   ++ concat internalVars'
+                                  ++ internalVars''
                       ; let fn''
-                                = if null internalVars'
+                                = if null internalVars
                                    then fn'
                                    else makeFunction
                                             (functionName fn')
