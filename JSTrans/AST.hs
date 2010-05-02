@@ -66,8 +66,6 @@ data Statement = EmptyStat
                | If Expr Statement (Maybe Statement)
                | While Expr Statement
                | DoWhile Expr Statement
--- | ForE (Maybe Expr) (Maybe Expr) (Maybe Expr) Statement
--- | ForE DefinitionKind String (Maybe Expr) (Maybe Expr) (Maybe Expr) Statement
                | For (Maybe Statement) (Maybe Expr) (Maybe Expr) Statement
                | ForIn ForInHead Expr Statement
                | ForEach ForInHead Expr Statement
@@ -483,12 +481,11 @@ scanJumps code = sjResult $ flip execState (ScanJumpData (ScanJumpResult False F
                                , visitFunction = const $ return ()
                                }
     defaultVisitor = getDefaultVisitor myVisitor
-    loopY body = do{ isInsideLoop <- gets sjIsInsideLoop
+    loop body = do{ isInsideLoop <- gets sjIsInsideLoop
                   ; modify (\s -> s { sjIsInsideLoop = True })
                   ; myStat body
                   ; modify (\s -> s { sjIsInsideLoop = isInsideLoop })
                   }
-    loop = loopY
     modifyR f = modify (\s@ScanJumpData { sjResult = r } -> s { sjResult = f r })
     myStat (While _ body) = loop body
     myStat (DoWhile _ body) = loop body

@@ -15,7 +15,7 @@ data TransformOptions = TransformOptions
   , transformLetExpression :: Bool
   , transformLetStatement :: Bool
   , transformLetDefinition :: Bool -- not implemented
-  , transformDestructuringAssignment :: Bool -- not implemented
+  , transformDestructuringAssignment :: Bool -- partially implemented
   , transformReservedNameAsIdentifier :: Bool
   , transformExpressionClosure :: Bool
   , transformGeneratorExpression :: Bool -- not parsed
@@ -73,15 +73,15 @@ transformProgram options p = evalState (AST.transformProgram transformer p) init
 transformAll = TransformOptions
   { transformConditionalCatch = True
   , transformForEach = True
-  , transformGenerator = True -- not parsed
+  , transformGenerator = True
   , transformArrayComprehension = True
   , transformLetExpression = True
-  , transformLetStatement = True -- not parsed
+  , transformLetStatement = True
   , transformLetDefinition = True
   , transformDestructuringAssignment = True
   , transformReservedNameAsIdentifier = True
   , transformExpressionClosure = True
-  , transformGeneratorExpression = True -- not parsed
+  , transformGeneratorExpression = True
   }
 
 getTransformer :: TransformOptions -> Transformer TransformerState
@@ -598,13 +598,12 @@ splitStatementsIntoFunction params args getStatements
                                        , transformFunction = return
                                        }
     defaultTransformer = getDefaultTransformer myTransformer
-    loopX body = do{ isInsideLoop <- gets ssIsInsideLoop
+    loop body = do{ isInsideLoop <- gets ssIsInsideLoop
                   ; modify (\s -> s { ssIsInsideLoop = True })
                   ; body' <- myStat body
                   ; modify (\s -> s { ssIsInsideLoop = isInsideLoop })
                   ; return body'
                   }
-    loop = loopX
     getJumpId jump = do{ ids <- gets ssIds
                        ; case find ((== jump) . fst) ids of
                            Just (_,id) -> return id
