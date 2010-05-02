@@ -13,7 +13,7 @@ data TransformOptions = TransformOptions
   , transformGenerator :: Bool -- not parsed
   , transformArrayComprehension :: Bool
   , transformLetExpression :: Bool
-  , transformLetStatement :: Bool -- not implemented
+  , transformLetStatement :: Bool
   , transformLetDefinition :: Bool -- not implemented
   , transformDestructuringAssignment :: Bool -- not implemented
   , transformReservedNameAsIdentifier :: Bool
@@ -22,6 +22,7 @@ data TransformOptions = TransformOptions
   }
 
 identifierToStringLiteral = StringLiteral . show
+integerToNumericLiteral = NumericLiteral . show
 
 data FunctionContext
     = FunctionContext
@@ -306,6 +307,49 @@ getTransformer options = myTransformer
               in myStat (Try b [] (Just (LHSSimple varName,Block [cc c])) f)
             }
     myStat (ForEach head o body) = tForEach head o body
+    myStat (LetStatement vars body)
+        | transformLetStatement options
+        = do{ let usedVariables = variablesUsedInInternalFunctions body
+            ; let definedVariables = concatMap (patternComponents . fst) vars
+            ; if null $ intersect usedVariables definedVariables
+              then
+                do{ let tVar (LHSSimple name,Nothing)
+                            = do{ name2 <- genSym
+                                ; return ([(name,name2)],Nothing,Just name2)
+                                }
+                        tVar (LHSSimple name,Just init)
+                            = do{ name2 <- genSym
+                                ; return ([(name,name2)],Just (LHSSimple $ Variable name2,init),Nothing)
+                                }
+                        tVar (pat,Just init)
+                            = do{ let names = patternComponents pat
+                                ; names2 <- mapM (const genSym) names
+                                ; let namesSubst = zip names names2
+                                ; let pat' = substVariablesInPattern namesSubst pat
+                                ; return (namesSubst,Just (patternNoExprToExpr pat',init),Nothing)
+                                }
+                  ; (subst',init',uninitialized') <- liftM unzip3 $ mapM tVar vars
+                  ; let subst = concat subst'
+                        init = catMaybes init'
+                        uninitialized = catMaybes uninitialized'
+                  ; initializers <- mapM (uncurry $ tAssign "=") init
+                  ; initializers
+                      <- if null uninitialized
+                         then return initializers
+                         else liftM (:initializers) (foldr (\v -> (tAssign "=" (LHSSimple $ Variable v) =<<)) (return undefinedExpr) uninitialized)
+                  ; Block statements <- myBlock $ substVariables subst body
+                  ; let statements' = (ExpressionStatement $ foldl1 (Binary ",") initializers):statements
+                  ; addInternalVariables $ map (\(_,n) -> (LHSSimple n,Nothing)) subst
+                  ; return $ BlockStatement $ Block statements'
+                  }
+              else
+                let (init,uninit) = partition (isJust . snd) vars
+                in splitStatementsIntoFunction (map fst $ init++uninit) (map (fromJust . snd) init)
+                       $ do{ Block body' <- myBlock body
+                           ; return body'
+                           }
+            }
+      where undefinedExpr = Prefix "void" $ Literal $ NumericLiteral "0"
     myStat x = transformStat defaultTransformer x
 
     myBlock :: Block -> TransformerState Block
@@ -498,3 +542,129 @@ splitIntoFunction params args getStatements
         ; let body = FunctionBody $ map Statement statements
         ; return $ FuncCall (FunctionExpression False $ makeFunction Nothing params body) args
         }
+
+data JumpKind = JKReturn
+              | JSValuedReturn
+              | JKBreak
+              | JKContinue
+              | JSLabelledBreak String
+              | JSLabelledContinue String
+                deriving (Eq,Show)
+data SplitStatementsData = SplitStatementsData{ ssSeenLabels :: [String]
+                                              , ssIsInsideLoop :: Bool
+                                              , ssIsInsideSwitch :: Bool
+                                              , ssIds :: [(Statement,Int)]
+                                              , ssNextId :: Int
+                                              , ssModeVar :: String
+                                              , ssValueVar :: String
+                                              }
+                         deriving (Eq,Show)
+ssIsInsideLoopOrSwitch ssdata = ssIsInsideLoop ssdata || ssIsInsideSwitch ssdata
+splitStatementsIntoFunction :: [LHSPatternNoExpr] -> [Expr] -> TransformerState [Statement] -> TransformerState Statement
+splitStatementsIntoFunction params args getStatements
+    = do{ prevIsInsideImplicitlyCreatedFunction <- getsF isInsideImplicitlyCreatedFunction
+        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
+        ; statements <- getStatements
+        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
+                                = prevIsInsideImplicitlyCreatedFunction})
+        ; let scanJumpResult = scanJumps statements
+              hasAnyJump = scanJumpResult /= (ScanJumpResult False False False False [])
+              hasValuedReturn = sjHasValuedReturn scanJumpResult
+              hasMultiplePath = let boolToInt True = 1
+                                    boolToInt False = 0
+                                in True
+        ; let makeFuncCall statements = FuncCall (FunctionExpression False
+                                                   $ makeFunction Nothing params
+                                                         $ FunctionBody $ map Statement statements) args
+        ; if not hasAnyJump
+          then return $ ExpressionStatement $ makeFuncCall statements
+          else
+            do{ modeVar <- if hasMultiplePath then genSym else genSym
+              ; valueVar <- if hasValuedReturn then genSym else genSym --return (error "valueVar referred")
+              ; addInternalVariables [(LHSSimple modeVar,Nothing),(LHSSimple valueVar,Nothing)]
+              ; let (statements',state) = transformStatements statements modeVar valueVar
+              ; let --jumpOuter [] = Throw $ Literal $ StringLiteral "\"YOU SHOULDN'T REACH HERE\""--EmptyStat
+                    jumpOuter [(jump,_)] = jump
+                    jumpOuter ((jump,id):xs) = If (Binary "===" (Variable modeVar) (Literal $ integerToNumericLiteral id))
+                                               jump (Just $ jumpOuter xs)
+              ; return $ If (makeFuncCall $ statements'++[Return $ Just $ Literal $ BooleanLiteral False]) (jumpOuter $ ssIds state) Nothing
+              }
+        }
+  where
+    transformStatements code modeVar valueVar = runState (applyTransformer myTransformer code) (SplitStatementsData [] False False [] 0 modeVar valueVar)
+    myTransformer,defaultTransformer :: Transformer (State SplitStatementsData)
+    myTransformer = defaultTransformer { transformExpr = return
+                                       , transformStat = myStat
+                                       , transformFunction = return
+                                       }
+    defaultTransformer = getDefaultTransformer myTransformer
+    loopX body = do{ isInsideLoop <- gets ssIsInsideLoop
+                  ; modify (\s -> s { ssIsInsideLoop = True })
+                  ; body' <- myStat body
+                  ; modify (\s -> s { ssIsInsideLoop = isInsideLoop })
+                  ; return body'
+                  }
+    loop = loopX
+    getJumpId jump = do{ ids <- gets ssIds
+                       ; case find ((== jump) . fst) ids of
+                           Just (_,id) -> return id
+                           Nothing -> do{ id <- gets ssNextId
+                                        ; modify (\s -> s { ssNextId = id+1
+                                                          , ssIds = (jump,id):ids
+                                                          })
+                                        ; return id
+                                        }
+                       }
+    transformJump jump = do{ modeVar <- gets ssModeVar
+                           ; id <- getJumpId jump
+                           ; return $ BlockStatement $ Block [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
+                                                             ,Return $ Just $ Literal $ BooleanLiteral True
+                                                             ]
+                           }
+    myStat (While a body) = liftM (While a) $ loop body
+    myStat (DoWhile a body) = liftM (DoWhile a) $ loop body
+    myStat (For a b c body) = liftM (For a b c) $ loop body
+    myStat (ForIn a b body) = liftM (ForIn a b) $ loop body
+    myStat (ForEach a b body) = liftM (ForEach a b) $ loop body
+    myStat stat@(Switch _ _) = do{ isInsideSwitch <- gets ssIsInsideSwitch
+                                 ; modify (\s -> s { ssIsInsideSwitch = True })
+                                 ; stat' <- transformStat defaultTransformer stat
+                                 ; modify (\s -> s { ssIsInsideSwitch = isInsideSwitch })
+                                 ; return stat'
+                                 }
+    myStat stat@(Break Nothing) = do{ isInsideLoopOrSwitch <- gets ssIsInsideLoopOrSwitch
+                                    ; if isInsideLoopOrSwitch
+                                      then return stat
+                                      else transformJump stat
+                                    }
+    myStat stat@(Break (Just label)) = do{ seenLabels <- gets ssSeenLabels
+                                         ; if label `elem` seenLabels
+                                           then return stat
+                                           else transformJump stat
+                                         }
+    myStat stat@(Continue Nothing) = do{ isInsideLoop <- gets ssIsInsideLoop
+                                       ; if isInsideLoop
+                                         then return stat
+                                         else transformJump stat
+                                       }
+    myStat stat@(Continue (Just label)) = do{ seenLabels <- gets ssSeenLabels
+                                            ; if label `elem` seenLabels
+                                              then return stat
+                                              else transformJump stat
+                                            }
+    myStat stat@(Return Nothing) = transformJump stat
+    myStat (Return (Just value)) = do{ modeVar <- gets ssModeVar
+                                     ; valueVar <- gets ssValueVar
+                                     ; id <- getJumpId (Return $ Just $ Variable valueVar)
+                                     ; return $ BlockStatement $ Block [ExpressionStatement $ Assign "=" (LHSSimple $ Variable valueVar) $ value
+                                                      ,ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
+                                                      ,Return $ Just $ Literal $ BooleanLiteral True
+                                                      ]
+                                     }
+    myStat (Labelled label stat) = do{ labels <- gets ssSeenLabels
+                                     ; modify (\s -> s { ssSeenLabels = label:labels })
+                                     ; stat' <- transformStat defaultTransformer stat
+                                     ; modify (\s -> s { ssSeenLabels = labels })
+                                     ; return (Labelled label stat')
+                                     }
+    myStat s = transformStat defaultTransformer s
