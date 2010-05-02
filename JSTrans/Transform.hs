@@ -617,7 +617,7 @@ splitStatementsIntoFunction params args getStatements
                        }
     transformJump jump = do{ modeVar <- gets ssModeVar
                            ; id <- getJumpId jump
-                           ; return $ BlockStatement $ Block [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ intergerToNumericLiteral id
+                           ; return $ BlockStatement $ Block [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
                                                              ,Return $ Just $ Literal $ BooleanLiteral True
                                                              ]
                            }
