@@ -193,6 +193,9 @@ stat (ExpressionStatement e)
 stat (Return value) = ident "return" . maybe id expr value . semi
 stat (Throw value) = ident "throw" . expr value . semi
 stat (BlockStatement b) = block b
+stat (If cond body@(If _ _ Nothing) else') = ident "if" . parens (expr cond)
+                                             . braces (stat body)
+                                             . option' (\x -> ident "else" . stat x) else'
 stat (If cond body else') = ident "if" . parens (expr cond)
                             . stat body
                             . option' (\x -> ident "else" . stat x) else'
