@@ -151,6 +151,10 @@ instance CodeFragment Program where
   applyTransformer = transformProgram
   applyVisitor = visitProgram
 
+instance CodeFragment a => CodeFragment [a] where
+  applyTransformer transformer = mapM (applyTransformer transformer)
+  applyVisitor visitor = mapM_ (applyVisitor visitor)
+
 -- workaround (should use -XFlexibleInstances?)
 class StringToList a where
   stringToList :: String -> [a]
@@ -455,6 +459,71 @@ variablesUsedInInternalFunctions x = flip execState [] $ applyVisitor myVisitor 
     defaultVisitor = getDefaultVisitor myVisitor
     myFunction fn = modify (\s -> s ++ outerVariables fn)
 
+
+data ScanJumpResult = ScanJumpResult{ sjHasReturn :: Bool
+                                    , sjHasValuedReturn :: Bool
+                                    , sjHasUnlabelledBreak :: Bool
+                                    , sjHasUnlabelledContinue :: Bool
+                                    , sjExternalLabels :: [String]
+                                    }
+                      deriving (Eq,Show)
+data ScanJumpData = ScanJumpData{ sjResult :: ScanJumpResult
+                                , sjSeenLabels :: [String]
+                                , sjIsInsideLoop :: Bool
+                                , sjIsInsideSwitch :: Bool
+                                }
+                    deriving (Eq,Show)
+sjIsInsideLoopOrSwitch sjdata = sjIsInsideLoop sjdata || sjIsInsideSwitch sjdata
+scanJumps :: CodeFragment a => a -> ScanJumpResult
+scanJumps code = sjResult $ flip execState (ScanJumpData (ScanJumpResult False False False False []) [] False False) $ applyVisitor myVisitor code
+  where
+    myVisitor,defaultVisitor :: Visitor (State ScanJumpData)
+    myVisitor = defaultVisitor { visitExpr = const $ return ()
+                               , visitStat = myStat
+                               , visitFunction = const $ return ()
+                               }
+    defaultVisitor = getDefaultVisitor myVisitor
+    loopY body = do{ isInsideLoop <- gets sjIsInsideLoop
+                  ; modify (\s -> s { sjIsInsideLoop = True })
+                  ; myStat body
+                  ; modify (\s -> s { sjIsInsideLoop = isInsideLoop })
+                  }
+    loop = loopY
+    modifyR f = modify (\s@ScanJumpData { sjResult = r } -> s { sjResult = f r })
+    myStat (While _ body) = loop body
+    myStat (DoWhile _ body) = loop body
+    myStat (For _ _ _ body) = loop body
+    myStat (ForIn _ _ body) = loop body
+    myStat (ForEach _ _ body) = loop body
+    myStat stat@(Switch _ _) = do{ isInsideSwitch <- gets sjIsInsideSwitch
+                                 ; modify (\s -> s { sjIsInsideSwitch = True })
+                                 ; visitStat defaultVisitor stat
+                                 ; modify (\s -> s { sjIsInsideSwitch = isInsideSwitch })
+                                 }
+    myStat (Break Nothing) = do{ isInsideLoopOrSwitch <- gets sjIsInsideLoopOrSwitch
+                               ; unless isInsideLoopOrSwitch
+                                   $ modifyR (\r -> r { sjHasUnlabelledBreak = True })
+                               }
+    myStat (Break (Just label)) = do{ seenLabels <- gets sjSeenLabels
+                                    ; when (label `notElem` seenLabels)
+                                        $ modifyR (\r -> r { sjExternalLabels = label : sjExternalLabels r })
+                                    }
+    myStat (Continue Nothing) = do{ isInsideLoop <- gets sjIsInsideLoop
+                                  ; unless isInsideLoop
+                                      $ modifyR (\r -> r { sjHasUnlabelledContinue = True })
+                                  }
+    myStat (Continue (Just label)) = do{ seenLabels <- gets sjSeenLabels
+                                       ; when (label `notElem` seenLabels)
+                                           $ modifyR (\r -> r { sjExternalLabels = label : sjExternalLabels r })
+                                       }
+    myStat (Return Nothing) = modifyR (\r -> r { sjHasReturn = True })
+    myStat (Return (Just _)) = modifyR (\r -> r { sjHasReturn = True , sjHasValuedReturn = True })
+    myStat (Labelled label stat) = do{ labels <- gets sjSeenLabels
+                                     ; modify (\s -> s { sjSeenLabels = label:labels })
+                                     ; visitStat defaultVisitor stat
+                                     ; modify (\s -> s { sjSeenLabels = labels })
+                                     }
+    myStat stat = visitStat defaultVisitor stat
 
 patternComponents :: LHSPattern a -> [a]
 patternComponents (LHSSimple x) = [x]
