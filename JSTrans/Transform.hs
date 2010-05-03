@@ -260,10 +260,12 @@ getTransformer options = myTransformer
             (\initializer e -> do{ e' <- myExpr e
                                  ; return $ Binary "," initializer e'
                                  })
-            (\params args -> splitIntoFunction params args
-                             $ do{ e' <- myExpr e
-                                 ; return [Return $ Just e']
-                                 })
+            (\params args -> do{ args' <- mapM myExpr args
+                               ; splitIntoFunction params args'
+                                 $ do{ e' <- myExpr e
+                                     ; return [Return $ Just e']
+                                     }
+                               })
     myExpr (Assign op pat rhs) = tAssign op pat rhs
     myExpr x = transformExpr defaultTransformer x
 
@@ -296,10 +298,12 @@ getTransformer options = myTransformer
                                     ; let statements' = (ExpressionStatement initializer):statements
                                     ; return $ BlockStatement $ Block statements'
                                     })
-            (\params args -> splitStatementsIntoFunction params args
-                             $ do{ Block body' <- myBlock body
-                                 ; return body'
-                                 })
+            (\params args -> do{ args' <- mapM myExpr args
+                               ; splitStatementsIntoFunction params args'
+                                 $ do{ Block body' <- myBlock body
+                                     ; return body'
+                                     }
+                               })
     myStat x = transformStat defaultTransformer x
 
     myBlock :: Block -> TransformerState Block
