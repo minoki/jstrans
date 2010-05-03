@@ -127,8 +127,9 @@ memberExpr = suffix =<< (primaryExpr
                  }
            <|> return a
 
-letExpr = do{ reserved "let"
-            ; variables <- parens $ sepBy1 varDeclaration comma
+letExpr = do{ try (reserved "let" >> symbol "(")
+            ; variables <- sepBy1 varDeclaration comma
+            ; symbol ")"
             ; body <- assignmentExprBase
             ; return $ Let variables body
             }
@@ -313,8 +314,9 @@ definition = do{ reserved "var" ; return VariableDefinition }
          <|> do{ try (reserved "let" >> notFollowedBy (char '(')) ; return LetDefinition }
 
 emptyStatement = semi >> return EmptyStat
-letStatement = do{ reserved "let"
-                 ; variables <- parens $ sepBy1 varDeclaration comma
+letStatement = do{ try (reserved "let" >> symbol "(")
+                 ; variables <- sepBy1 varDeclaration comma
+                 ; symbol ")"
                  ; do{ body <- block
                      ; return $ LetStatement variables body
                      }
