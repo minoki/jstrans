@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -XRelaxedPolyRec #-}
+{-# OPTIONS_GHC -XRelaxedPolyRec -XPolymorphicComponents #-}
 module JSTrans.AST where
 import Prelude
 import Text.ParserCombinators.Parsec.Expr (Assoc)
@@ -102,6 +102,7 @@ data Monad m => Transformer m
                   , transformFuncDecl :: String -> Function -> m Function
                   , transformFunction :: Function -> m Function
                   , transformProgram :: Program -> m Program
+                  , transformerVarDeclHook :: forall a. [LHSPatternNoExpr] -> m a -> m a
                   }
 transformSourceElem :: Monad m => Transformer m -> SourceElement -> m SourceElement
 transformFunctionBody :: Monad m => Transformer m -> FunctionBody -> m FunctionBody
@@ -113,6 +114,7 @@ data Monad m => Visitor m
               , visitFuncDecl :: String -> Function -> m ()
               , visitFunction :: Function -> m ()
               , visitProgram :: Program -> m ()
+              , visitorVarDeclHook :: [LHSPatternNoExpr] -> m () -> m ()
               }
 visitSourceElem :: Monad m => Visitor m -> SourceElement -> m ()
 visitFunctionBody :: Monad m => Visitor m -> FunctionBody -> m ()
@@ -193,6 +195,7 @@ getDefaultTransformer v
                   , transformFuncDecl = myFuncDecl
                   , transformFunction = myFunction
                   , transformProgram = myProgram
+                  , transformerVarDeclHook = const id
                   }
   where
     expr = transformExpr v
@@ -200,6 +203,7 @@ getDefaultTransformer v
     block = transformBlock v
     sourceElem = transformSourceElem v
     function = transformFunction v
+    withVariableDeclared = transformerVarDeclHook v
 
     varDecl (name,e) = do{ v <- mmap expr e
                          ; return (name,v)
@@ -224,11 +228,12 @@ getDefaultTransformer v
     myExpr (FuncCall fn args) = liftM2 FuncCall (expr fn) (mapM expr args)
     myExpr (ArrayLiteral elems) = liftM ArrayLiteral (mapM (mmap expr) elems)
     myExpr (ArrayComprehension x f i)
-        = do{ x' <- expr x
-            ; f' <- mapM (\(k,n,o) -> do{ o' <- expr o ; return (k,n,o') }) f
-            ; i' <- mmap expr i
-            ; return $ ArrayComprehension x' f' i'
-            }
+        = withVariableDeclared (map (\(_,n,_) -> n) f)
+          $ do{ x' <- expr x
+              ; f' <- mapM (\(k,n,o) -> do{ o' <- expr o ; return (k,n,o') }) f
+              ; i' <- mmap expr i
+              ; return $ ArrayComprehension x' f' i'
+              }
     myExpr (ObjectLiteral elems) = liftM ObjectLiteral (mapM elem elems)
       where 
         elem (pname,Left value) = do{ value' <- expr value
@@ -237,7 +242,7 @@ getDefaultTransformer v
         elem (pname,Right (kind,fn)) = do{ fn' <- function fn
                                          ; return (pname,Right (kind,fn'))
                                          }
-    myExpr (Let l e) = liftM2 Let (mapM varDecl l) (expr e)
+    myExpr (Let l e) = liftM2 Let (mapM varDecl l) $ withVariableDeclared (map fst l) (expr e)
     myExpr (FunctionExpression isEC fn)
         = liftM (FunctionExpression isEC) (function fn)
     myExpr t@(Variable _) = return t
@@ -248,7 +253,7 @@ getDefaultTransformer v
 
     myStat t@EmptyStat = return t
     myStat (VarDef kind l) = liftM (VarDef kind) (mapM varDecl l)
-    myStat (LetStatement l b) = liftM2 LetStatement (mapM varDecl l) (block b)
+    myStat (LetStatement l b) = liftM2 LetStatement (mapM varDecl l) $ withVariableDeclared (map fst l) (block b)
     myStat (ExpressionStatement e) = liftM ExpressionStatement (expr e)
     myStat (Return x) = liftM Return (mmap expr x)
     myStat (Throw x) = liftM Throw (expr x)
@@ -256,12 +261,15 @@ getDefaultTransformer v
     myStat (If c t e) = liftM3 If (expr c) (stat t) (mmap stat e)
     myStat (While c b) = liftM2 While (expr c) (stat b)
     myStat (DoWhile c b) = liftM2 DoWhile (expr c) (stat b)
+    myStat (For a@(Just (VarDef LetDefinition vars)) b c d) = withVariableDeclared (map fst vars) $ liftM4 For (mmap stat a) (mmap expr b) (mmap expr c) (stat d)
     myStat (For a b c d) = liftM4 For (mmap stat a) (mmap expr b) (mmap expr c) (stat d)
+    myStat (ForIn a@(ForInVarDef LetDefinition var _) b c) = withVariableDeclared [var] $ liftM3 ForIn (forInHead a) (expr b) (stat c)
     myStat (ForIn a b c) = liftM3 ForIn (forInHead a) (expr b) (stat c)
+    myStat (ForEach a@(ForInVarDef LetDefinition var _) b c) = withVariableDeclared [var] $ liftM3 ForEach (forInHead a) (expr b) (stat c)
     myStat (ForEach a b c) = liftM3 ForEach (forInHead a) (expr b) (stat c)
     myStat (Try b cc uc f) = liftM4 Try (block b) (mapM tcc cc) (mmap tuc uc) (mmap block f)
-      where tcc (a,b,c) = liftM2 ((,,) a) (expr b) (block c)
-            tuc (a,b) = liftM ((,) a) (block b)
+      where tcc (a,b,c) = withVariableDeclared [a] $ liftM2 ((,,) a) (expr b) (block c)
+            tuc (a,b) = withVariableDeclared [a] $ liftM ((,) a) (block b)
     myStat (Switch e c) = liftM2 Switch (expr e) (mapM cc c)
       where cc (CaseClause e s) = liftM2 CaseClause (expr e) (mapM stat s)
             cc (DefaultClause s) = liftM DefaultClause (mapM stat s)
@@ -270,11 +278,18 @@ getDefaultTransformer v
     myStat (Labelled label s) = liftM (Labelled label) (stat s)
     myStat t@Debugger = return t
 
-    myBlock (Block s) = liftM Block $ mapM stat s
+    myBlock (Block s) = liftM Block $ withVariableDeclared vars $ mapM stat s
+      where vars = scanLetDecl s
     myFuncDecl name f = function f
     myFunction f = liftM (makeFunction (functionName f) (functionArguments f))
-                            (transformFunctionBody v (functionBody f))
+                            (withVariableDeclared vars
+                                                      $ transformFunctionBody v (functionBody f))
+      where vars = functionArguments f
+                   `union` (map LHSSimple $ functionVariables f)
+                   `union` [LHSSimple "arguments"]
+                   `union` maybe [] (\n -> [LHSSimple n]) (functionName f)
     myProgram (Program p) = liftM Program $ mapM sourceElem p
+
 
 visitSourceElem v (Statement st) = visitStat v st
 visitSourceElem v (FunctionDeclaration name fn)
@@ -290,6 +305,7 @@ getDefaultVisitor v
               , visitFuncDecl = myFuncDecl
               , visitFunction = myFunction
               , visitProgram = myProgram
+              , visitorVarDeclHook = const id
               }
   where
     expr = visitExpr v
@@ -297,6 +313,7 @@ getDefaultVisitor v
     block = visitBlock v
     sourceElem = visitSourceElem v
     function = visitFunction v
+    withVariableDeclared = visitorVarDeclHook v
 
     mmap :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
     mmap f (Just x) = f x >>= return . Just
@@ -324,12 +341,13 @@ getDefaultVisitor v
     myExpr (FuncCall fn args) = expr fn >> mapM_ expr args
     myExpr (ArrayLiteral elems) = mapM_ (mmap expr) elems
     myExpr (ArrayComprehension x f i)
-        = expr x >> mapM_ (\(_,_,o) -> expr o) f >> mmap_ expr i
+        = withVariableDeclared (map (\(_,n,_) -> n) f)
+          $ expr x >> mapM_ (\(_,_,o) -> expr o) f >> mmap_ expr i
     myExpr (ObjectLiteral elems) = mapM_ elem elems
       where 
         elem (_,Left value) = expr value
         elem (_,Right (_,fn)) = function fn
-    myExpr (Let l e) = mapM_ varDecl l >> expr e
+    myExpr (Let l e) = mapM_ varDecl l >> withVariableDeclared (map fst l) (expr e)
     myExpr (FunctionExpression isEC fn) = function fn
     myExpr t@(Variable _) = return ()
     myExpr t@(Literal _) = return ()
@@ -339,7 +357,7 @@ getDefaultVisitor v
 
     myStat t@EmptyStat = return ()
     myStat (VarDef _ l) = mapM_ varDecl l
-    myStat (LetStatement l b) = mapM_ varDecl l >> block b
+    myStat (LetStatement l b) = mapM_ varDecl l >> withVariableDeclared (map fst l) (block b)
     myStat (ExpressionStatement e) = expr e
     myStat (Return x) = mmap_ expr x
     myStat (Throw x) = expr x
@@ -347,12 +365,15 @@ getDefaultVisitor v
     myStat (If c t e) = expr c >> stat t >> mmap_ stat e
     myStat (While c b) = expr c >> stat b
     myStat (DoWhile c b) = expr c >> stat b
+    myStat (For a@(Just (VarDef LetDefinition vars)) b c d) = withVariableDeclared (map fst vars) $ mmap_ stat a >> mmap_ expr b >> mmap_ expr c >> stat d
     myStat (For a b c d) = mmap_ stat a >> mmap_ expr b >> mmap_ expr c >> stat d
+    myStat (ForIn a@(ForInVarDef LetDefinition var _) b c) = withVariableDeclared [var] $ forInHead a >> expr b >> stat c
     myStat (ForIn a b c) = forInHead a >> expr b >> stat c
+    myStat (ForEach a@(ForInVarDef LetDefinition var _) b c) = withVariableDeclared [var] $ forInHead a >> expr b >> stat c
     myStat (ForEach a b c) = forInHead a >> expr b >> stat c
     myStat (Try b cc uc f) = block b >> mapM_ tcc cc >> mmap_ tuc uc >> mmap_ block f
-      where tcc (a,b,c) = expr b >> block c
-            tuc (a,b) = block b
+      where tcc (a,b,c) = withVariableDeclared [a] $ expr b >> block c
+            tuc (a,b) = withVariableDeclared [a] $ block b
     myStat (Switch e c) = expr e >> mapM_ cc c
       where cc (CaseClause e s) = expr e >> mapM_ stat s
             cc (DefaultClause s) = mapM_ stat s
@@ -361,9 +382,14 @@ getDefaultVisitor v
     myStat (Labelled label s) = stat s
     myStat t@Debugger = return ()
 
-    myBlock (Block s) = mapM_ stat s
+    myBlock (Block s) = withVariableDeclared vars $ mapM_ stat s
+      where vars = scanLetDecl s
     myFuncDecl name f = function f
-    myFunction f = visitFunctionBody v (functionBody f)
+    myFunction f = withVariableDeclared vars $ visitFunctionBody v (functionBody f)
+      where vars = functionArguments f
+                   `union` (map LHSSimple $ functionVariables f)
+                   `union` [LHSSimple "arguments"]
+                   `union` maybe [] (\n -> [LHSSimple n]) (functionName f)
     myProgram (Program p) = mapM_ sourceElem p
 
 
@@ -380,6 +406,20 @@ scanVarDecl x = flip execState ([]::[String]) $ applyVisitor myVisitor x
     myStat (VarDef _ vars) = modify (`union` concatMap (patternComponents . fst) vars)
     myStat s = visitStat defaultVisitor s
     myFunc name fn = modify (`union` [name])
+
+scanLetDecl :: CodeFragment a => a -> [LHSPatternNoExpr]
+scanLetDecl x = flip execState ([]::[LHSPatternNoExpr]) $ applyVisitor myVisitor x
+  where
+    myVisitor,defaultVisitor :: Visitor (State [LHSPatternNoExpr])
+    myVisitor = defaultVisitor { visitExpr = const $ return ()
+                               , visitStat = myStat
+                               , visitBlock = const $ return ()
+                               , visitFuncDecl = const $ const $ return ()
+                               , visitFunction = const $ return ()
+                               }
+    defaultVisitor = getDefaultVisitor myVisitor
+    myStat (VarDef LetDefinition vars) = modify (`union` map fst vars)
+    myStat s = visitStat defaultVisitor s
 
 -- Scans declared functions in a function or a program
 scanFuncDecl :: CodeFragment a => a -> [(String,Function)]
