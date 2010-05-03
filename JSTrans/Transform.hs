@@ -338,20 +338,17 @@ getTransformer options = myTransformer
                           else (Statement $ VarDef VariableDefinition vars):body
             ; return $ makeFunction (functionName fn) args' $ FunctionBody body'
             }
+      where
+        transformFunctionArgument pat@(LHSSimple _)
+            = return (pat,[])
+        transformFunctionArgument pat
+            = do{ name <- genSym
+                ; vars <- unpackPattern genSym pat (Variable name)
+                ; return (LHSSimple name,map (\(n,x) -> (LHSSimple n,Just x)) vars)
+                }
     transformFunctionArguments fn
         | not $ transformDestructuringAssignment options
         = return fn
-    transformFunctionArgument pat@(LHSSimple _)
-        = return (pat,[])
-    transformFunctionArgument pat
-        | transformDestructuringAssignment options
-        = do{ name <- genSym
-            ; vars <- unpackPattern genSym pat (Variable name)
-            ; return (LHSSimple name,map (\(n,x) -> (LHSSimple n,Just x)) vars)
-            }
-    transformFunctionArgument pat
-        | not $ transformDestructuringAssignment options
-        = return (pat,[])
 
 scanInternalIdentifierUse :: [SourceElement] -> Int
 scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVisitor) code
@@ -496,7 +493,9 @@ splitIntoFunction params args getStatements
         ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
                                 = prevIsInsideImplicitlyCreatedFunction})
         ; let body = FunctionBody $ map Statement statements
-        ; return $ FuncCall (FunctionExpression False $ makeFunction Nothing params body) args
+              fn = makeFunction Nothing params body
+        ; fn' <- transformFunctionArguments fn
+        ; return $ FuncCall (FunctionExpression False fn') args
         }
 
 data JumpKind = JKReturn
@@ -529,11 +528,14 @@ splitStatementsIntoFunction params args getStatements
               hasMultiplePath = let boolToInt True = 1
                                     boolToInt False = 0
                                 in True
-        ; let makeFuncCall statements = FuncCall (FunctionExpression False
-                                                   $ makeFunction Nothing params
-                                                         $ FunctionBody $ map Statement statements) args
+        ; let makeFuncCall statements
+                  = do{ let fn = makeFunction Nothing params
+                                                         $ FunctionBody $ map Statement statements
+                      ; fn' <- transformFunctionArguments fn
+                      ; return $ FuncCall (FunctionExpression False fn') args
+                      }
         ; if not hasAnyJump
-          then return $ ExpressionStatement $ makeFuncCall statements
+          then liftM ExpressionStatement $ makeFuncCall statements
           else
             do{ modeVar <- if hasMultiplePath then genSym else genSym
               ; valueVar <- if hasValuedReturn then genSym else genSym --return (error "valueVar referred")
@@ -543,7 +545,8 @@ splitStatementsIntoFunction params args getStatements
                     jumpOuter [(jump,_)] = jump
                     jumpOuter ((jump,id):xs) = If (Binary "===" (Variable modeVar) (Literal $ integerToNumericLiteral id))
                                                jump (Just $ jumpOuter xs)
-              ; return $ If (makeFuncCall $ statements'++[Return $ Just $ Literal $ BooleanLiteral False]) (jumpOuter $ ssIds state) Nothing
+              ; call <- makeFuncCall $ statements'++[Return $ Just $ Literal $ BooleanLiteral False]
+              ; return $ If call (jumpOuter $ ssIds state) Nothing
               }
         }
   where
