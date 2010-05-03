@@ -37,6 +37,7 @@ data TransformerData
     = TransformerData
       { genSymCounter :: Int
       , functionContext :: FunctionContext
+      , transformOptions :: TransformOptions
       }
 type TransformerState = State TransformerData
 
@@ -52,6 +53,8 @@ addInternalVariables variables = modifyF (\s -> s { internalVariables = internal
 
 getsF f = gets (f . functionContext)
 modifyF f = modify (\s -> s { functionContext = f (functionContext s) })
+
+getOption f = gets (f . transformOptions)
 
 genSym :: TransformerState String
 genSym = do{ n <- gets genSymCounter
@@ -73,6 +76,7 @@ transformProgram options p = evalState (AST.transformProgram transformer p) init
     initialN = 1+scanInternalIdentifierUse statements
     initialState = TransformerData { genSymCounter = initialN
                                    , functionContext = emptyFunctionContext { isGlobal = True }
+                                   , transformOptions = options
                                    }
 
 
@@ -327,8 +331,13 @@ getTransformer options = myTransformer
                                       in FunctionBody ((Statement $ VarDef VariableDefinition internalVars):body))
                       }
 
-    transformFunctionArguments fn
-        | transformDestructuringAssignment options
+transformFunctionArguments fn
+    = do{ t <- getOption transformDestructuringAssignment
+        ; if t then doTransformFunctionArguments
+               else return fn
+        }
+  where
+    doTransformFunctionArguments
         = do{ let FunctionBody body = functionBody fn
                   args = functionArguments fn
             ; (args',vars') <- liftM unzip $ mapM transformFunctionArgument args
@@ -338,17 +347,13 @@ getTransformer options = myTransformer
                           else (Statement $ VarDef VariableDefinition vars):body
             ; return $ makeFunction (functionName fn) args' $ FunctionBody body'
             }
-      where
-        transformFunctionArgument pat@(LHSSimple _)
-            = return (pat,[])
-        transformFunctionArgument pat
-            = do{ name <- genSym
-                ; vars <- unpackPattern genSym pat (Variable name)
-                ; return (LHSSimple name,map (\(n,x) -> (LHSSimple n,Just x)) vars)
-                }
-    transformFunctionArguments fn
-        | not $ transformDestructuringAssignment options
-        = return fn
+    transformFunctionArgument pat@(LHSSimple _)
+        = return (pat,[])
+    transformFunctionArgument pat
+        = do{ name <- genSym
+            ; vars <- unpackPattern genSym pat (Variable name)
+            ; return (LHSSimple name,map (\(n,x) -> (LHSSimple n,Just x)) vars)
+            }
 
 scanInternalIdentifierUse :: [SourceElement] -> Int
 scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVisitor) code
