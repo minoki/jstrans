@@ -280,13 +280,13 @@ getTransformer options = myTransformer
             ; let
                   cc [] = case uc of
                             Nothing -> (Throw (Variable varName))
-                            Just (LHSSimple n,x) -> BlockStatement (substVariable n varName x)
-                            Just (pat,x) -> undefined {-BlockStatement (substVariable n varName x)-}
-                  cc ((LHSSimple n,e,x):xs) = If (substVariable n varName e)
-                                                 (BlockStatement (substVariable n varName x))
+                            Just (LHSSimple n,x) -> BlockStatement (substVariables [(n,varName)] x)
+                            Just (pat,x) -> undefined {-BlockStatement (substVariables [(n,varName)] x)-}
+                  cc ((LHSSimple n,e,x):xs) = If (substVariables [(n,varName)] e)
+                                                 (BlockStatement (substVariables [(n,varName)] x))
                                                  (Just (cc xs))
-                  cc ((n,e,x):xs) = undefined {-If (substVariable n varName e)
-                                                 (BlockStatement (substVariable n varName x))
+                  cc ((n,e,x):xs) = undefined {-If (substVariables [(n,varName)] e)
+                                                 (BlockStatement (substVariables [(n,varName)] x))
                                                  (Just (cc xs))-} -- FIXME
               in myStat (Try b [] (Just (LHSSimple varName,Block [cc c])) f)
             }
@@ -392,66 +392,52 @@ scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVis
             ; visitFunction defaultVisitor fn
             }
 
-substVariable :: CodeFragment a => String -> String -> a -> a
-substVariable from to code = evalState (applyTransformer myTransformer code) ()
-  where
-    myTransformer,defaultTransformer :: Transformer (State ())
-    myTransformer = defaultTransformer { transformExpr = myExpr
-                                       , transformStat = myStat
-                                       , transformFunction = myFunction
-                                       }
-    defaultTransformer = getDefaultTransformer myTransformer
-    ident name | name == from = to
-               | otherwise = name
-    pattern p@(LHSSimple name) | name == from = LHSSimple to
-                               | otherwise = p
-    pattern (LHSArray elems) = LHSArray $ map (fmap pattern) elems
-    pattern (LHSObject elems) = LHSObject $ map (\(name,pat) -> (name,pattern pat)) elems
-    myExpr (Variable name) = return (Variable $ ident name)
-    myExpr v = transformExpr defaultTransformer v
-    myStat (VarDef kind vars) = do{ vars' <- mapM varDecl vars
-                                  ; return $ VarDef kind vars'
-                                  }
-      where varDecl (name,Just e) = do{ e' <- myExpr e
-                                      ; return (pattern name,Just e')
-                                      }
-            varDecl (name,Nothing) = return (pattern name,Nothing)
-    myStat s = transformStat defaultTransformer s
-    myFunction fn
-        = if from `elem` concatMap patternComponents (functionArguments fn)
-          || from `elem` functionVariables fn
-          || from == "argument"
-          || Just from == functionName fn
-           then return fn
-           else transformFunction defaultTransformer fn
-
 substVariables :: CodeFragment a => [(String,String)] -> a -> a
-substVariables subst code = evalState (applyTransformer myTransformer code) ()
+substVariables subst code = evalState (applyTransformer myTransformer code) []
   where
     substFrom = map fst subst
-    myTransformer,defaultTransformer :: Transformer (State ())
+    myTransformer,defaultTransformer :: Transformer (State [String])
     myTransformer = defaultTransformer { transformExpr = myExpr
                                        , transformStat = myStat
+                                       , transformerVarDeclHook = withVariableDeclared
                                        }
     defaultTransformer = getDefaultTransformer myTransformer
     ident name = case find (\(from,_) -> name == from) subst of
                    Just (_,to) -> to
                    Nothing -> name
-    pattern f (LHSSimple name) = LHSSimple name
-    pattern f (LHSArray elems) = LHSArray $ map (fmap (pattern f)) elems
-    pattern f (LHSObject elems) = LHSObject $ map (\(k,v) -> (k,pattern f v)) elems
-    patternNoExpr = pattern ident
-    patternExpr = pattern myExpr
-    myExpr (Variable name) = return (Variable $ ident name)
+    pattern declared pat@(LHSSimple name) | name `notElem` declared = LHSSimple $ ident name
+                                          | otherwise = pat
+    pattern declared (LHSArray elems) = LHSArray $ map (fmap (pattern declared)) elems
+    pattern declared (LHSObject elems) = LHSObject $ map (\(k,v) -> (k,pattern declared v)) elems
+    withVariableDeclared vars f
+        = do{ let vars' = concatMap patternComponents vars
+            ; declaredVariables <- get
+            ; put (vars'++declaredVariables)
+            ; x <- f
+            ; put declaredVariables
+            ; return x
+            }
+    myExpr e@(Variable name) = do{ wasDeclared <- gets (name `elem`)
+                                 ; return (if wasDeclared then e else Variable $ ident name)
+                                 }
     myExpr v = transformExpr defaultTransformer v
-    myStat (VarDef kind vars) = do{ vars' <- mapM varDecl vars
-                                  ; return $ VarDef kind vars'
+    myStat (VarDef kind vars) = do{ declared <- get
+                                  ; let vars' = map (varDecl declared) vars
+                                  ; defaultStat $ VarDef kind vars'
                                   }
-      where varDecl (name,Just e) = do{ e' <- myExpr e
-                                      ; return (patternNoExpr name,Just e')
-                                      }
-            varDecl (name,Nothing) = return (patternNoExpr name,Nothing)
-    myStat s = transformStat defaultTransformer s
+      where varDecl declared (name,v) = (pattern declared name,v)
+    myStat (ForIn (ForInVarDef kind var val) o body)
+        | kind /= LetDefinition = do{ declared <- get
+                                    ; let var' = pattern declared var
+                                    ; defaultStat $ ForIn (ForInVarDef kind var' val) o body
+                                    }
+    myStat (ForEach (ForInVarDef kind var val) o body)
+        | kind /= LetDefinition = do{ declared <- get
+                                    ; let var' = pattern declared var
+                                    ; defaultStat $ ForEach (ForInVarDef kind var' val) o body
+                                    }
+    myStat s = defaultStat s
+    defaultStat = transformStat defaultTransformer
 
 substVariablesInPattern :: [(String,String)] -> LHSPatternNoExpr -> LHSPatternNoExpr
 substVariablesInPattern subst pat = pattern pat

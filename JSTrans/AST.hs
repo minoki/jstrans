@@ -440,13 +440,13 @@ scanUsedVar x = fst $ flip execState ([],[]) $ applyVisitor myVisitor x
   where
     myVisitor,defaultVisitor :: Visitor (State ([String]{-usedVariables-},[String]{-declaredVariables-}))
     myVisitor = defaultVisitor { visitExpr = myExpr
-                               , visitStat = myStat
-                               , visitFunction = myFunction
+                               , visitorVarDeclHook = withVariableDeclared
                                }
     defaultVisitor = getDefaultVisitor myVisitor
     withVariableDeclared vars f
-        = do{ (usedVariables,declaredVariables) <- get
-            ; let declaredVariables' = declaredVariables `union` vars
+        = do{ let vars' = concatMap patternComponents vars
+            ; (usedVariables,declaredVariables) <- get
+            ; let declaredVariables' = declaredVariables `union` vars'
             ; put (usedVariables,declaredVariables')
             ; f
             ; (usedVariables',_) <- get
@@ -457,35 +457,7 @@ scanUsedVar x = fst $ flip execState ([],[]) $ applyVisitor myVisitor x
             ; when (name `notElem` declaredVariables)
                 (put (usedVariables `union` [name],declaredVariables))
             }
-    myExpr (ArrayComprehension x f i)
-        = withVariableDeclared (concatMap (\(_,n,_) -> patternComponents n) f)
-          $ do{ myExpr x
-              ; mapM_ myExpr $ map (\(_,_,x) -> x) f
-              ; maybe (return ()) myExpr i
-              }
     myExpr v = visitExpr defaultVisitor v
-    myStat (Try b cc uc f) = do{ visitBlock defaultVisitor b
-                               ; mapM_ tcc cc
-                               ; maybe (return ()) tuc uc
-                               ; maybe (return ()) (visitBlock defaultVisitor) f
-                               }
-      where
-        tcc (name,b,c)
-            = withVariableDeclared (patternComponents name)
-              $ do{ myExpr b
-                  ; visitBlock defaultVisitor c
-                  }
-        tuc (name,b)
-            = withVariableDeclared (patternComponents name)
-              $ visitBlock defaultVisitor b
-
-    myStat s = visitStat defaultVisitor s
-    myFunction fn
-        = withVariableDeclared (concatMap patternComponents (functionArguments fn)
-                        `union` functionVariables fn
-                        `union` ["arguments"]
-                        `union` maybeToList (functionName fn))
-          $ visitFunction defaultVisitor fn
 
 -- Scans variables used in internal functions
 variablesUsedInInternalFunctions :: CodeFragment a => a -> [String]
