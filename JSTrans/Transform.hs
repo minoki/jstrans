@@ -102,6 +102,14 @@ getTransformer options = myTransformer
                              }
     defaultTransformer = getDefaultTransformer myTransformer
 
+    mmap :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
+    mmap f (Just x) = f x >>= return . Just
+    mmap f Nothing = return Nothing
+
+    myPatternExpr (LHSSimple a) = liftM LHSSimple $ myExpr a
+    myPatternExpr (LHSArray elems) = liftM LHSArray $ mapM (mmap myPatternExpr) elems
+    myPatternExpr (LHSObject elems) = liftM LHSObject $ mapM (\(name,pat) -> do{ pat' <- myPatternExpr pat ; return (name,pat') }) elems
+
     tAssign :: Operator -> LHSPatternExpr -> Expr -> TransformerState Expr
     tAssign "=" pat rhs
         | transformDestructuringAssignment options && not (isTrivialPattern pat)
@@ -122,8 +130,11 @@ getTransformer options = myTransformer
                                        ; return (pat,Just rhs)
                                        }
             varDef1 (pat,Nothing) = return (pat,Nothing)
-    tForIn head o body -- FIXME: head
-        = do{ body <- myStat body
+    tForInHead (ForInLHSExpr e) = liftM ForInLHSExpr $ myPatternExpr e
+    tForInHead (ForInVarDef kind pat e) = liftM (ForInVarDef kind pat) (mmap myExpr e)
+    tForIn head o body
+        = do{ head <- tForInHead head
+            ; body <- myStat body
             ; o <- myExpr o
             ; return $ ForIn head o body
             }
@@ -155,8 +166,9 @@ getTransformer options = myTransformer
                                      (BlockStatement
                                       $ Block [ExpressionStatement a,body])])
             }
-    tForEach head o body -- FIXME: head
-        = do{ body <- myStat body
+    tForEach head o body
+        = do{ head <- tForInHead head
+            ; body <- myStat body
             ; o <- myExpr o
             ; return $ ForEach head o body
             }
