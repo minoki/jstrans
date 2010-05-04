@@ -298,15 +298,16 @@ varStatement = do{ defKind <- definition
                  ; return $ VarDef defKind varDecls
                  }
 
-varDeclarationBase
+varDeclarationBase inForInHead
     = do{ name <- patternNoExpr
         ; init <- option' (reservedOp "=" >> assignmentExprBase)
-        ; when (not (isTrivialPattern name) && init == Nothing)
+        ; when (not inForInHead && not (isTrivialPattern name) && init == Nothing)
                    $ unexpected "SyntaxError: destructuring declaration must be followed by '='"
         ; return (name,init)
         }
-varDeclaration = allowIn varDeclarationBase
-varDeclarationNoIn = disallowIn varDeclarationBase
+varDeclaration = allowIn (varDeclarationBase False)
+varDeclarationNoIn = disallowIn (varDeclarationBase False)
+varDeclarationForInHead = disallowIn (varDeclarationBase True)
 
 definition :: Parser DefinitionKind
 definition = do{ reserved "var" ; return VariableDefinition }
@@ -379,7 +380,7 @@ iterationStatement = doWhileStatement
         = do{ e0 <- fmap ForInLHSExpr patternExpr
                 <|> do{ kind <- (reserved "var" >> return VariableDefinition)
                             <|> (reserved "let" >> return LetDefinition)
-                      ; (n,v) <- varDeclarationNoIn
+                      ; (n,v) <- varDeclarationForInHead
                       ; return $ ForInVarDef kind n v
                       }
             ; reserved "in"

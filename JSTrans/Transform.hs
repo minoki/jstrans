@@ -126,6 +126,17 @@ getTransformer options = myTransformer
     tAssign op pat rhs = do{ rhs <- myExpr rhs
                            ; return $ Assign op pat rhs
                            }
+    tAssign2 pat rhs
+        | transformDestructuringAssignment options && not (isTrivialPattern pat)
+        = if isEmptyPattern pat
+          then myExpr rhs
+          else do{ vars <- unpackPattern newInternalVariable pat rhs
+                 ; vars' <- mapM (\(lhs,rhs) -> tAssign2 (LHSSimple lhs) rhs) vars
+                 ; return $ foldl1 (Binary ",") vars'
+                 }
+    tAssign2 pat rhs = do{ rhs <- myExpr rhs
+                         ; return $ Assign "=" pat rhs
+                         }
     tVarDef kind variables
         = do{ variables <- mapM varDef1 variables
             ; return $ VarDef kind variables
@@ -136,6 +147,29 @@ getTransformer options = myTransformer
             varDef1 (pat,Nothing) = return (pat,Nothing)
     tForInHead (ForInLHSExpr e) = liftM ForInLHSExpr $ myPatternExpr e
     tForInHead (ForInVarDef kind pat e) = liftM (ForInVarDef kind pat) (mmap myExpr e)
+    tForIn (ForInLHSExpr pat) o body
+        | transformDestructuringAssignment options && not (isTrivialPattern pat)
+        = do{ keyName <- genSym
+            ; addInternalVariables [(LHSSimple keyName,Nothing)]
+            ; o <- myExpr o
+            ; body <- myStat body
+            ; a <- tAssign2 pat (Variable keyName)
+            ; let body' = BlockStatement $ Block [ExpressionStatement a,body]
+            ; return $ ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o body'
+            }
+    tForIn (ForInVarDef kind pat e) o body
+        | transformDestructuringAssignment options && not (isTrivialPattern pat)
+        = do{ keyName <- genSym
+            ; addInternalVariables [(LHSSimple keyName,Nothing)]
+            ; let vars = patternComponents pat
+            ; varDef <- tVarDef kind $ if e == Nothing then map (\n -> (LHSSimple n,Nothing)) vars else [(pat,e)]
+            ; o <- myExpr o
+            ; body <- myStat body
+            ; a <- tAssign2 (patternNoExprToExpr pat) (Variable keyName)
+            ; let body' = BlockStatement $ Block [ExpressionStatement a,body]
+            ; let forInStat = ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o body'
+            ; return $ BlockStatement $ Block [varDef,forInStat]
+            }
     tForIn head o body
         = do{ head <- tForInHead head
             ; body <- myStat body
@@ -230,7 +264,7 @@ getTransformer options = myTransformer
                 ; f' <- compFor f
                 ; def <- tVarDef VariableDefinition
                          $ (LHSSimple arrayName,Just $ New (Variable "Array") [])
-                               :(map (\(_,n,_) -> (n,Nothing)) f)
+                               :(map (\n -> (LHSSimple n,Nothing)) $ concatMap (\(_,p,_) -> patternComponents p) f)
                 ; return [def,f',Return (Just arrayVar)]
                 }
             }
@@ -290,6 +324,7 @@ getTransformer options = myTransformer
                                                  (Just (cc xs))-} -- FIXME
               in myStat (Try b [] (Just (LHSSimple varName,Block [cc c])) f)
             }
+    myStat (ForIn head o body) = tForIn head o body
     myStat (ForEach head o body) = tForEach head o body
     myStat (LetStatement vars body)
         | transformLetStatement options
