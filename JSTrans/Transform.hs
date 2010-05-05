@@ -138,6 +138,16 @@ getTransformer options = myTransformer
                          ; return $ Assign "=" pat rhs
                          }
     tVarDef kind variables
+        | transformDestructuringAssignment options
+        = do{ variables <- liftM concat $ mapM varDef1 variables
+            ; return $ VarDef kind variables
+            }
+      where varDef1 (pat,Just rhs) = do{ rhs <- myExpr rhs
+                                       ; vars <- unpackPattern2 genSym pat rhs
+                                       ; return $ map (\(a,b) -> (LHSSimple a,Just b)) vars
+                                       }
+            varDef1 (pat,Nothing) = return $ map (\a -> (LHSSimple a,Nothing)) $ patternComponents pat -- In this case, pat should be LHSSimple
+    tVarDef kind variables
         = do{ variables <- mapM varDef1 variables
             ; return $ VarDef kind variables
             }
@@ -304,6 +314,7 @@ getTransformer options = myTransformer
     myExpr x = transformExpr defaultTransformer x
 
     myStat :: Statement -> TransformerState Statement
+    myStat (VarDef kind vars) = tVarDef kind vars
     myStat (Try b [(var@(LHSSimple varName),e,c)] Nothing f)
         | transformConditionalCatch options
         = myStat (Try b [] (Just (var,cc)) f)
@@ -512,7 +523,7 @@ unpackPattern2 newVar pat e
     | isSingleElementPattern pat = unpackPattern newVar pat e
     | otherwise = do{ name <- newVar
                     ; vars <- unpackPattern newVar pat (Variable name)
-                    ; return $ (Variable name,e):vars
+                    ; return $ (patternFromIdentifier name,e):vars
                     }
 
 splitIntoFunction :: [LHSPatternNoExpr] -> [Expr] -> TransformerState [Statement] -> TransformerState Expr
