@@ -72,8 +72,7 @@ transformProgram :: TransformOptions -> Program -> Program
 transformProgram options p = evalState (AST.transformProgram transformer p) initialState
   where
     transformer = getTransformer options
-    Program statements = p
-    initialN = 1+scanInternalIdentifierUse statements
+    initialN = 1+scanInternalIdentifierUse p
     initialState = TransformerData { genSymCounter = initialN
                                    , functionContext = emptyFunctionContext { isGlobal = True }
                                    , transformOptions = options
@@ -405,14 +404,13 @@ transformFunctionArguments fn
             ; return (LHSSimple name,map (\(n,x) -> (LHSSimple n,Just x)) vars)
             }
 
-scanInternalIdentifierUse :: [SourceElement] -> Int
-scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVisitor) code
+scanInternalIdentifierUse :: CodeFragment a => a -> Int
+scanInternalIdentifierUse code = flip execState 0 $ applyVisitor myVisitor code
   where
     myVisitor,defaultVisitor :: Visitor (State Int)
     myVisitor = defaultVisitor { visitExpr = myExpr
-                               , visitStat = myStat
                                , visitFuncDecl = myFuncDecl
-                               , visitFunction = myFunction
+                               , visitorVarDeclHook = withVariableDeclared
                                }
     defaultVisitor = getDefaultVisitor myVisitor
     handleIdentifier ('$':s)
@@ -425,18 +423,10 @@ scanInternalIdentifierUse code = flip execState 0 $ mapM_ (visitSourceElem myVis
     handlePattern (LHSSimple name) = handleIdentifier name
     handlePattern (LHSArray elems) = mapM_ (maybe (return ()) handlePattern) elems
     handlePattern (LHSObject elems) = mapM_ (handlePattern . snd) elems
+    withVariableDeclared vars x = mapM_ handlePattern vars >> x
     myExpr (Variable name) = handleIdentifier name
     myExpr v = visitExpr defaultVisitor v
-    myStat (VarDef _ vars) = mapM_ handlePattern $ map fst vars
-    myStat s = visitStat defaultVisitor s
     myFuncDecl name fn = handleIdentifier name >> visitFuncDecl defaultVisitor name fn
-    myFunction fn
-        = do{ mapM_ handlePattern $ functionArguments fn
-            ; mapM_ handleIdentifier $ functionVariables fn
-            ; mapM_ handleIdentifier $ maybeToList (functionName fn)
-            ; --TODO: let variable
-            ; visitFunction defaultVisitor fn
-            }
 
 substVariables :: CodeFragment a => [(String,String)] -> a -> a
 substVariables subst code = evalState (applyTransformer myTransformer code) []

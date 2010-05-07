@@ -288,7 +288,8 @@ getDefaultTransformer v
                    `union` (map LHSSimple $ functionVariables f)
                    `union` [LHSSimple "arguments"]
                    `union` maybe [] (\n -> [LHSSimple n]) (functionName f)
-    myProgram (Program p) = liftM Program $ mapM sourceElem p
+    myProgram (Program p) = liftM Program $ withVariableDeclared vars $ mapM sourceElem p
+      where vars = map (\n -> LHSSimple n) $ scanVarDecl p
 
 
 visitSourceElem v (Statement st) = visitStat v st
@@ -390,7 +391,8 @@ getDefaultVisitor v
                    `union` (map LHSSimple $ functionVariables f)
                    `union` [LHSSimple "arguments"]
                    `union` maybe [] (\n -> [LHSSimple n]) (functionName f)
-    myProgram (Program p) = mapM_ sourceElem p
+    myProgram (Program p) = withVariableDeclared vars $ mapM_ sourceElem p
+      where vars = map (\n -> LHSSimple n) $ scanVarDecl p
 
 
 -- Scans declared variables in a code fragment, a function or a program
@@ -404,6 +406,8 @@ scanVarDecl x = flip execState ([]::[String]) $ applyVisitor myVisitor x
                                }
     defaultVisitor = getDefaultVisitor myVisitor
     myStat (VarDef _ vars) = modify (`union` concatMap (patternComponents . fst) vars)
+    myStat s@(ForIn (ForInVarDef kind var _) b c) = modify (`union` patternComponents var) >> visitStat defaultVisitor s
+    myStat s@(ForEach (ForInVarDef kind var _) b c) = modify (`union` patternComponents var) >> visitStat defaultVisitor s
     myStat s = visitStat defaultVisitor s
     myFunc name fn = modify (`union` [name])
 
