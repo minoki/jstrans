@@ -10,16 +10,16 @@ module JSTrans.Parser.Token (whiteSpace,noLineTerminator
 import Text.ParserCombinators.Parsec hiding (Parser)
 import JSTrans.AST
 import JSTrans.Parser.Prim
-{-
 import Data.Char (generalCategory
                  ,GeneralCategory(Space,NonSpacingMark
                                  ,SpacingCombiningMark
                                  ,DecimalNumber
                                  ,ConnectorPunctuation))
--}
+import Char
+import Monad (unless)
+import Numeric (readHex)
 import List
 
---unicodeCategory :: GeneralCategory -> Parser Char
 lineTerminatorChars :: [Char]
 whiteSpace :: Parser ()
 noLineTerminator,lineTerminator :: Parser ()
@@ -71,15 +71,14 @@ reservedNames = [-- Keywords
                 ,"null","true","false"
                 ]
 
---unicodeCategory cat = satisfy ((cat ==) . generalCategory)
-
 -- U+2028:LS,U+2029:PS
 lineTerminatorChars = "\LF\CR\x2028\x2029"
 
 whiteSpace = do{ updateState (\st -> st {psHadNewLine = False})
                ; skipMany (whiteSpaceChars
                        <|> lineTerminator
-                       <|> comment)
+                       <|> comment
+                       <|> (satisfy (\c -> generalCategory c == Space) >> return ()))
                }
           <?> ""
   where
@@ -104,8 +103,7 @@ whiteSpace = do{ updateState (\st -> st {psHadNewLine = False})
                   ; inComment
                   }
     -- U+00A0:NBSP,U+FEFF:BOM,Zs
-    whiteSpaceChars = skipMany1 (oneOf "\HT\VT\FF\SP\x00A0\xFEFF"
-                                {- <|> unicodeCategory Space -})
+    whiteSpaceChars = skipMany1 $ oneOf "\HT\VT\FF\SP\x00A0\xFEFF"
     lineTerminator = do{ oneOf lineTerminatorChars
                        ; updateState (\s -> s {psHadNewLine = True})
                        }
@@ -138,14 +136,18 @@ comma = lexeme $ char ','
 colon = lexeme $ char ':'
 dot = lexeme $ char '.'
 
-identifierStart = letter <|> oneOf "$_" -- TODO: unicodeEscapeSequence
-identifierPart = identifierStart
-             {- <|> unicodeCategory NonSpacingMark -}
-             {- <|> unicodeCategory SpacingCombiningMark -}
-             <|> digit {- <|> unicodeCategory DecimalNumber -}
-             {- <|> unicodeCategory ConnectorPunctuation -}
-             -- U+200C:Zero width non-joiner <ZWNJ>,U+200D:Zero with joiner <ZWJ>
-             <|> oneOf "\x200C\x200D"
+identifierStart = satisfy isValidIdentifierStart <|> unicodeEscapeSequence isValidIdentifierStart
+identifierPart = satisfy isValidIdentifierPart <|> unicodeEscapeSequence isValidIdentifierPart
+isValidIdentifierStart c = isAlpha c || c == '$' || c == '_'
+isValidIdentifierPart c = isValidIdentifierStart c
+                          || isDigit c
+                          || cat == NonSpacingMark
+                          || cat == SpacingCombiningMark
+                          || cat == DecimalNumber
+                          || cat == ConnectorPunctuation
+                          || c == '\x200C' -- U+200C: Zero width non-joiner <ZWNJ>
+                          || c == '\x200D' -- U+200D: Zero with joiner <ZWJ>
+  where cat = generalCategory c
 
 ident = do{ c <- identifierStart
           ; cs <- many identifierPart
@@ -297,3 +299,16 @@ regExpLiteral = lexeme
                         ; return (c0:)
                         }
                   <|> regExpBackslashSequence
+
+unicodeEscapeSequence p = do{ char '\\'
+                            ; char 'u'
+                            ; a <- hexDigit
+                            ; b <- hexDigit
+                            ; c <- hexDigit
+                            ; d <- hexDigit
+                            ; let [(v,_)] = readHex [a,b,c,d]
+                            ; let value = toEnum v
+                            ; unless (p value)
+                              $ unexpected $ show ['\\','u',a,b,c,d]
+                            ; return value
+                            }
