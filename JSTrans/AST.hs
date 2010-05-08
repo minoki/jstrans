@@ -171,6 +171,8 @@ instance StringToList a => PatternFromIdentifier [a] where -- String
 instance PatternFromIdentifier Expr where
   patternFromIdentifier = Variable
 
+blockStatement = BlockStatement . Block
+
 makeFunction name args body = fn
   where
     fn :: Function

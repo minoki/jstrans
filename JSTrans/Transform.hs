@@ -167,7 +167,7 @@ getTransformer options = myTransformer
             ; o <- myExpr o
             ; body <- myStat body
             ; a <- tAssign2 pat (Variable keyName)
-            ; let body' = BlockStatement $ Block [ExpressionStatement a,body]
+            ; let body' = blockStatement [ExpressionStatement a,body]
             ; return $ ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o body'
             }
     tForIn (ForInVarDef kind pat e) o body
@@ -178,9 +178,9 @@ getTransformer options = myTransformer
             ; o <- myExpr o
             ; body <- myStat body
             ; a <- tAssign2 (patternNoExprToExpr pat) (Variable keyName)
-            ; let body' = BlockStatement $ Block [ExpressionStatement a,body]
+            ; let body' = blockStatement [ExpressionStatement a,body]
             ; let forInStat = ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o body'
-            ; return $ BlockStatement $ Block [varDef,forInStat]
+            ; return $ blockStatement [varDef,forInStat]
             }
     tForIn head o body
         = do{ head <- tForInHead head
@@ -194,12 +194,12 @@ getTransformer options = myTransformer
             ; keyName <- genSym
             ; def <- tVarDef VariableDefinition [(LHSSimple objName,Just o)]
             ; a <- tAssign "=" lhs $ Index (Variable objName) (Variable keyName)
-            ; return (BlockStatement
-                      $ Block [def
-                              ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
-                                     (Variable objName)
-                                     (BlockStatement
-                                      $ Block [ExpressionStatement a,body])])
+            ; return $ blockStatement
+                         [def
+                         ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
+                                (Variable objName)
+                                (blockStatement [ExpressionStatement a,body])
+                         ]
             }
     tForEach (ForInVarDef kind valName init) o body
         | transformForEach options
@@ -208,13 +208,13 @@ getTransformer options = myTransformer
             ; def <- tVarDef VariableDefinition [(LHSSimple objName,Just o)]
             ; def2 <- tVarDef kind [(valName,init)]
             ; a <- tAssign "=" (patternNoExprToExpr valName) $ Index (Variable objName) (Variable keyName)
-            ; return (BlockStatement
-                      $ Block [def
-                              ,def2
-                              ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
-                                     (Variable objName)
-                                     (BlockStatement
-                                      $ Block [ExpressionStatement a,body])])
+            ; return $ blockStatement
+                       [def
+                       ,def2
+                       ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
+                              (Variable objName)
+                              (blockStatement [ExpressionStatement a,body])
+                       ]
             }
     tForEach head o body
         = do{ head <- tForInHead head
@@ -230,6 +230,7 @@ getTransformer options = myTransformer
                then do{ w <- getsF aliasForArguments
                       ; name <- maybe (do{ name <- genSym
                                          ; modifyF (\s -> s {aliasForArguments = Just name})
+                                         ; addFunctionVariables [(LHSSimple name,Just v)]
                                          ; return name
                                          }) return w
                       ; return $ Variable name
@@ -242,6 +243,7 @@ getTransformer options = myTransformer
                then do{ w <- getsF aliasForThis
                       ; name <- maybe (do{ name <- genSym
                                          ; modifyF (\s -> s {aliasForThis = Just name})
+                                         ; addFunctionVariables [(LHSSimple name,Just v)]
                                          ; return name
                                          }) return w
                       ; return $ Variable name
@@ -344,7 +346,7 @@ getTransformer options = myTransformer
         = letVariables (tAssign "=") vars body
             (\initializer body -> do{ Block statements <- myBlock body
                                     ; let statements' = (ExpressionStatement initializer):statements
-                                    ; return $ BlockStatement $ Block statements'
+                                    ; return $ blockStatement statements'
                                     })
             (\params args -> do{ args' <- mapM myExpr args
                                ; splitStatementsIntoFunction params args'
@@ -364,17 +366,11 @@ getTransformer options = myTransformer
     myFunction fn = do{ outer <- getsF id
                       ; modifyF (const emptyFunctionContext)
                       ; fn' <- transformFunctionArguments fn >>= transformFunction defaultTransformer
-                      ; aliasForThis' <- getsF aliasForThis
-                      ; aliasForArguments' <- getsF aliasForArguments
                       ; functionVariables <- getsF addedFunctionVariables
                       ; tempVariables <- getsF temporaryVariables
                       ; modifyF (const outer)
-                      ; let internalVars
-                                = (maybe [] (\s -> [(LHSSimple s,Just This)]) aliasForThis')
-                                  ++ (maybe [] (\s -> [(LHSSimple s,Just (Variable "arguments"))])
-                                            aliasForArguments')
-                                  ++ map (\n -> (LHSSimple n,Nothing)) tempVariables
-                                  ++ functionVariables
+                      ; let internalVars = map (\n -> (LHSSimple n,Nothing)) tempVariables
+                                           ++ functionVariables
                       ; return
                           $ if null internalVars
                             then fn'
@@ -419,11 +415,9 @@ scanInternalIdentifierUse code = flip execState 0 $ applyVisitor myVisitor code
                                }
     defaultVisitor = getDefaultVisitor myVisitor
     handleIdentifier ('$':s)
-        | and $ map isDigit s
-        = do{ let [(m,_)] = readDec s
-            ; n <- get
-            ; put $ max n m
-            }
+        | all isDigit s
+        = let [(m,_)] = readDec s
+          in modify (max m)
     handleIdentifier _ = return ()
     handlePattern (LHSSimple name) = handleIdentifier name
     handlePattern (LHSArray elems) = mapM_ (maybe (return ()) handlePattern) elems
@@ -556,7 +550,6 @@ data SplitStatementsData = SplitStatementsData{ ssSeenLabels :: [String]
                                               , ssNextId :: Int
                                               , ssModeVar :: String
                                               , ssValueVar :: String
-                                              , ssDeclaredVariables :: [LHSPatternNoExpr]
                                               }
                          deriving (Eq,Show)
 ssIsInsideLoopOrSwitch ssdata = ssIsInsideLoop ssdata || ssIsInsideSwitch ssdata
@@ -603,7 +596,7 @@ splitStatementsIntoFunction params args getStatements
               }
         }
   where
-    transformStatements code modeVar valueVar = runStateT (applyTransformer myTransformer code) (SplitStatementsData [] False False [] 0 modeVar valueVar [])
+    transformStatements code modeVar valueVar = runStateT (applyTransformer myTransformer code) (SplitStatementsData [] False False [] 0 modeVar valueVar)
     myTransformer,defaultTransformer :: Transformer (StateT SplitStatementsData TransformerState)
     myTransformer = defaultTransformer { transformExpr = return
                                        , transformStat = myStat
@@ -628,9 +621,9 @@ splitStatementsIntoFunction params args getStatements
                        }
     transformJump jump = do{ modeVar <- gets ssModeVar
                            ; id <- getJumpId jump
-                           ; return $ BlockStatement $ Block [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
-                                                             ,Return $ Just $ Literal $ BooleanLiteral True
-                                                             ]
+                           ; return $ blockStatement [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
+                                                     ,Return $ Just $ Literal $ BooleanLiteral True
+                                                     ]
                            }
     myStat (While a body) = liftM (While a) $ loop body
     myStat (DoWhile a body) = liftM (DoWhile a) $ loop body
@@ -638,28 +631,28 @@ splitStatementsIntoFunction params args getStatements
     myStat (ForIn (ForInVarDef kind valName init) b body)
         | kind /= LetDefinition = do{ body' <- loop body
                                     ; lift $ addFunctionVariables (map (\n -> (LHSSimple n,Nothing)) $ patternComponents valName)
+                                    ; let transformedLoop = ForIn (ForInLHSExpr $ patternNoExprToExpr valName) b body'
                                     ; return
                                       $ case init of
-                                          Nothing -> ct body'
-                                          Just init' -> BlockStatement $ Block
+                                          Nothing -> transformedLoop
+                                          Just init' -> blockStatement
                                                           [ExpressionStatement $ Assign "=" (patternNoExprToExpr valName) init'
-                                                          ,ct body'
+                                                          ,transformedLoop
                                                           ]
                                     }
-      where ct = ForIn (ForInLHSExpr $ patternNoExprToExpr valName) b
     myStat (ForIn a b body) = liftM (ForIn a b) $ loop body
     myStat (ForEach (ForInVarDef kind valName init) b body)
         | kind /= LetDefinition = do{ body' <- loop body
                                     ; lift $ addFunctionVariables (map (\n -> (LHSSimple n,Nothing)) $ patternComponents valName)
+                                    ; let transformedLoop = ForEach (ForInLHSExpr $ patternNoExprToExpr valName) b body'
                                     ; return
                                       $ case init of
-                                          Nothing -> ct body'
-                                          Just init' -> BlockStatement $ Block
+                                          Nothing -> transformedLoop
+                                          Just init' -> blockStatement
                                                           [ExpressionStatement $ Assign "=" (patternNoExprToExpr valName) init'
-                                                          ,ct body'
+                                                          ,transformedLoop
                                                           ]
                                     }
-      where ct = ForEach (ForInLHSExpr $ patternNoExprToExpr valName) b
     myStat (ForEach a b body) = liftM (ForEach a b) $ loop body
     myStat stat@(Switch _ _) = do{ isInsideSwitch <- gets ssIsInsideSwitch
                                  ; modify (\s -> s { ssIsInsideSwitch = True })
@@ -691,10 +684,11 @@ splitStatementsIntoFunction params args getStatements
     myStat (Return (Just value)) = do{ modeVar <- gets ssModeVar
                                      ; valueVar <- gets ssValueVar
                                      ; id <- getJumpId (Return $ Just $ Variable valueVar)
-                                     ; return $ BlockStatement $ Block [ExpressionStatement $ Assign "=" (LHSSimple $ Variable valueVar) $ value
-                                                      ,ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
-                                                      ,Return $ Just $ Literal $ BooleanLiteral True
-                                                      ]
+                                     ; return $ blockStatement
+                                                  [ExpressionStatement $ Assign "=" (LHSSimple $ Variable valueVar) $ value
+                                                  ,ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
+                                                  ,Return $ Just $ Literal $ BooleanLiteral True
+                                                  ]
                                      }
     myStat (Labelled label stat) = do{ labels <- gets ssSeenLabels
                                      ; modify (\s -> s { ssSeenLabels = label:labels })
@@ -702,13 +696,9 @@ splitStatementsIntoFunction params args getStatements
                                      ; modify (\s -> s { ssSeenLabels = labels })
                                      ; return (Labelled label stat')
                                      }
-    myStat (VarDef kind vars) | kind /= LetDefinition = do{ --prevDeclaredVariables <- gets ssDeclaredVariables
-                                                          ; let declaredVariables = concatMap (patternComponents . fst) vars
+    myStat (VarDef kind vars) | kind /= LetDefinition = do{ let declaredVariables = concatMap (patternComponents . fst) vars
                                                           ; lift $ addFunctionVariables (map (\n -> (LHSSimple n,Nothing)) declaredVariables)
-                                                          ; --modify (\s -> s { ssDeclaredVariables = declaredVariables `union` prevDeclaredVariables })
-                                                          ; let init = mapMaybe (\(pat,val) -> case val of
-                                                                                                 Just x -> Just (Assign "=" (patternNoExprToExpr pat) x)
-                                                                                                 Nothing -> Nothing) vars
+                                                          ; let init = mapMaybe (\(pat,val) -> fmap (Assign "=" (patternNoExprToExpr pat)) val) vars
                                                           ; return $ if null init
                                                                      then EmptyStat
                                                                      else ExpressionStatement $ foldl1 (Binary ",") init
