@@ -4,7 +4,7 @@ import JSTrans.Parser.Token (reservedNames)
 import Control.Monad.State
 import Char (isDigit)
 import Numeric (readDec)
-import Maybe (maybeToList,isJust,isNothing,fromJust,catMaybes)
+import Maybe (maybeToList,isJust,isNothing,fromJust,catMaybes,mapMaybe)
 import List (union,find,intersect,partition)
 
 data TransformOptions = TransformOptions
@@ -30,7 +30,8 @@ data FunctionContext
       , aliasForArguments :: Maybe String
       , isInsideImplicitlyCreatedFunction :: Bool
       , isGlobal :: Bool
-      , internalVariables :: [(LHSPattern String,Maybe Expr)]
+      , addedFunctionVariables :: [(LHSPattern String,Maybe Expr)]
+      , temporaryVariables :: [String]
       }
 
 data TransformerData
@@ -45,11 +46,15 @@ emptyFunctionContext = FunctionContext { aliasForThis = Nothing
                                        , aliasForArguments = Nothing
                                        , isInsideImplicitlyCreatedFunction = False
                                        , isGlobal = False
-                                       , internalVariables = []
+                                       , addedFunctionVariables = []
+                                       , temporaryVariables = []
                                        }
 
-addInternalVariables :: [(LHSPattern String,Maybe Expr)] -> TransformerState ()
-addInternalVariables variables = modifyF (\s -> s { internalVariables = internalVariables s ++ variables })
+addFunctionVariables :: [(LHSPattern String,Maybe Expr)] -> TransformerState ()
+addFunctionVariables variables = modifyF (\s -> s { addedFunctionVariables = addedFunctionVariables s ++ variables })
+
+addTemporaryVariables :: [String] -> TransformerState ()
+addTemporaryVariables variables = modifyF (\s -> s { temporaryVariables = temporaryVariables s ++ variables })
 
 getsF f = gets (f . functionContext)
 modifyF f = modify (\s -> s { functionContext = f (functionContext s) })
@@ -62,11 +67,11 @@ genSym = do{ n <- gets genSymCounter
            ; return ('$':show n)
            }
 
-newInternalVariable :: TransformerState String
-newInternalVariable = do{ name <- genSym
-                        ; addInternalVariables [(LHSSimple name,Nothing)]
-                        ; return name
-                        }
+newTemporaryVariable :: TransformerState String
+newTemporaryVariable = do{ name <- genSym
+                         ; addTemporaryVariables [name]
+                         ; return name
+                         }
 
 transformProgram :: TransformOptions -> Program -> Program
 transformProgram options p = evalState (AST.transformProgram transformer p) initialState
@@ -118,7 +123,7 @@ getTransformer options = myTransformer
         | transformDestructuringAssignment options && not (isTrivialPattern pat)
         = if isEmptyPattern pat
           then myExpr rhs
-          else do{ vars <- unpackPattern2 newInternalVariable pat rhs
+          else do{ vars <- unpackPattern2 newTemporaryVariable pat rhs
                  ; vars' <- mapM (\(lhs,rhs) -> tAssign "=" (LHSSimple lhs) rhs) vars
                  ; return $ foldl1 (Binary ",") vars'
                  }
@@ -129,7 +134,7 @@ getTransformer options = myTransformer
         | transformDestructuringAssignment options && not (isTrivialPattern pat)
         = if isEmptyPattern pat
           then myExpr rhs
-          else do{ vars <- unpackPattern newInternalVariable pat rhs
+          else do{ vars <- unpackPattern newTemporaryVariable pat rhs
                  ; vars' <- mapM (\(lhs,rhs) -> tAssign2 (LHSSimple lhs) rhs) vars
                  ; return $ foldl1 (Binary ",") vars'
                  }
@@ -158,8 +163,7 @@ getTransformer options = myTransformer
     tForInHead (ForInVarDef kind pat e) = liftM (ForInVarDef kind pat) (mmap myExpr e)
     tForIn (ForInLHSExpr pat) o body
         | transformDestructuringAssignment options && not (isTrivialPattern pat)
-        = do{ keyName <- genSym
-            ; addInternalVariables [(LHSSimple keyName,Nothing)]
+        = do{ keyName <- newTemporaryVariable
             ; o <- myExpr o
             ; body <- myStat body
             ; a <- tAssign2 pat (Variable keyName)
@@ -168,8 +172,7 @@ getTransformer options = myTransformer
             }
     tForIn (ForInVarDef kind pat e) o body
         | transformDestructuringAssignment options && not (isTrivialPattern pat)
-        = do{ keyName <- genSym
-            ; addInternalVariables [(LHSSimple keyName,Nothing)]
+        = do{ keyName <- newTemporaryVariable
             ; let vars = patternComponents pat
             ; varDef <- tVarDef kind $ if e == Nothing then map (\n -> (LHSSimple n,Nothing)) vars else [(pat,e)]
             ; o <- myExpr o
@@ -363,13 +366,15 @@ getTransformer options = myTransformer
                       ; fn' <- transformFunctionArguments fn >>= transformFunction defaultTransformer
                       ; aliasForThis' <- getsF aliasForThis
                       ; aliasForArguments' <- getsF aliasForArguments
-                      ; internalVars' <- getsF internalVariables
+                      ; functionVariables <- getsF addedFunctionVariables
+                      ; tempVariables <- getsF temporaryVariables
                       ; modifyF (const outer)
                       ; let internalVars
                                 = (maybe [] (\s -> [(LHSSimple s,Just This)]) aliasForThis')
                                   ++ (maybe [] (\s -> [(LHSSimple s,Just (Variable "arguments"))])
                                             aliasForArguments')
-                                  ++ internalVars'
+                                  ++ map (\n -> (LHSSimple n,Nothing)) tempVariables
+                                  ++ functionVariables
                       ; return
                           $ if null internalVars
                             then fn'
@@ -519,11 +524,19 @@ unpackPattern2 newVar pat e
 splitIntoFunction :: [LHSPatternNoExpr] -> [Expr] -> TransformerState [Statement] -> TransformerState Expr
 splitIntoFunction params args getStatements
     = do{ prevIsInsideImplicitlyCreatedFunction <- getsF isInsideImplicitlyCreatedFunction
-        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
+        ; prevTemporaryVariables <- getsF temporaryVariables
+        ; modifyF (\s -> s { isInsideImplicitlyCreatedFunction = True
+                           , temporaryVariables = []
+                           })
         ; statements <- getStatements
-        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
-                                = prevIsInsideImplicitlyCreatedFunction})
-        ; let body = FunctionBody $ map Statement statements
+        ; tempVars <- getsF temporaryVariables
+        ; modifyF (\s -> s { isInsideImplicitlyCreatedFunction = prevIsInsideImplicitlyCreatedFunction
+                           , temporaryVariables = prevTemporaryVariables
+                           })
+        ; let statements' | null tempVars = statements
+                          | not (null tempVars) = (VarDef VariableDefinition $ map (\n -> (LHSSimple n,Nothing)) tempVars)
+                                                  : statements
+        ; let body = FunctionBody $ map Statement statements'
               fn = makeFunction Nothing params body
         ; fn' <- transformFunctionArguments fn
         ; return $ FuncCall (FunctionExpression False fn') args
@@ -543,16 +556,22 @@ data SplitStatementsData = SplitStatementsData{ ssSeenLabels :: [String]
                                               , ssNextId :: Int
                                               , ssModeVar :: String
                                               , ssValueVar :: String
+                                              , ssDeclaredVariables :: [LHSPatternNoExpr]
                                               }
                          deriving (Eq,Show)
 ssIsInsideLoopOrSwitch ssdata = ssIsInsideLoop ssdata || ssIsInsideSwitch ssdata
 splitStatementsIntoFunction :: [LHSPatternNoExpr] -> [Expr] -> TransformerState [Statement] -> TransformerState Statement
 splitStatementsIntoFunction params args getStatements
     = do{ prevIsInsideImplicitlyCreatedFunction <- getsF isInsideImplicitlyCreatedFunction
-        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction = True})
+        ; prevTemporaryVariables <- getsF temporaryVariables
+        ; modifyF (\s -> s { isInsideImplicitlyCreatedFunction = True
+                           , temporaryVariables = []
+                           })
         ; statements <- getStatements
-        ; modifyF (\s -> s {isInsideImplicitlyCreatedFunction
-                                = prevIsInsideImplicitlyCreatedFunction})
+        ; tempVars <- getsF temporaryVariables
+        ; modifyF (\s -> s { isInsideImplicitlyCreatedFunction = prevIsInsideImplicitlyCreatedFunction
+                           , temporaryVariables = prevTemporaryVariables
+                           })
         ; let scanJumpResult = scanJumps statements
               hasAnyJump = scanJumpResult /= (ScanJumpResult False False False False [])
               hasValuedReturn = sjHasValuedReturn scanJumpResult
@@ -560,19 +579,22 @@ splitStatementsIntoFunction params args getStatements
                                     boolToInt False = 0
                                 in True
         ; let makeFuncCall statements
-                  = do{ let fn = makeFunction Nothing params
-                                                         $ FunctionBody $ map Statement statements
+                  = do{ let statements' | null tempVars = statements
+                                        | not (null tempVars) = (VarDef VariableDefinition $ map (\n -> (LHSSimple n,Nothing)) tempVars)
+                                                                : statements
+                      ; let fn = makeFunction Nothing params
+                                                         $ FunctionBody $ map Statement statements'
                       ; fn' <- transformFunctionArguments fn
                       ; return $ FuncCall (FunctionExpression False fn') args
                       }
+        ; modeVar <- if hasMultiplePath then genSym else genSym
+        ; valueVar <- if hasValuedReturn then genSym else genSym --return (error "valueVar referred")
+        ; addTemporaryVariables [modeVar,valueVar]
+        ; (statements',state) <- transformStatements statements modeVar valueVar
         ; if not hasAnyJump
-          then liftM ExpressionStatement $ makeFuncCall statements
+          then liftM ExpressionStatement $ makeFuncCall statements'
           else
-            do{ modeVar <- if hasMultiplePath then genSym else genSym
-              ; valueVar <- if hasValuedReturn then genSym else genSym --return (error "valueVar referred")
-              ; addInternalVariables [(LHSSimple modeVar,Nothing),(LHSSimple valueVar,Nothing)]
-              ; let (statements',state) = transformStatements statements modeVar valueVar
-              ; let --jumpOuter [] = Throw $ Literal $ StringLiteral "\"YOU SHOULDN'T REACH HERE\""--EmptyStat
+            do{ let --jumpOuter [] = Throw $ Literal $ StringLiteral "\"YOU SHOULDN'T REACH HERE\""--EmptyStat
                     jumpOuter [(jump,_)] = jump
                     jumpOuter ((jump,id):xs) = If (Binary "===" (Variable modeVar) (Literal $ integerToNumericLiteral id))
                                                jump (Just $ jumpOuter xs)
@@ -581,8 +603,8 @@ splitStatementsIntoFunction params args getStatements
               }
         }
   where
-    transformStatements code modeVar valueVar = runState (applyTransformer myTransformer code) (SplitStatementsData [] False False [] 0 modeVar valueVar)
-    myTransformer,defaultTransformer :: Transformer (State SplitStatementsData)
+    transformStatements code modeVar valueVar = runStateT (applyTransformer myTransformer code) (SplitStatementsData [] False False [] 0 modeVar valueVar [])
+    myTransformer,defaultTransformer :: Transformer (StateT SplitStatementsData TransformerState)
     myTransformer = defaultTransformer { transformExpr = return
                                        , transformStat = myStat
                                        , transformFunction = return
@@ -613,7 +635,31 @@ splitStatementsIntoFunction params args getStatements
     myStat (While a body) = liftM (While a) $ loop body
     myStat (DoWhile a body) = liftM (DoWhile a) $ loop body
     myStat (For a b c body) = liftM (For a b c) $ loop body
+    myStat (ForIn (ForInVarDef kind valName init) b body)
+        | kind /= LetDefinition = do{ body' <- loop body
+                                    ; lift $ addFunctionVariables (map (\n -> (LHSSimple n,Nothing)) $ patternComponents valName)
+                                    ; return
+                                      $ case init of
+                                          Nothing -> ct body'
+                                          Just init' -> BlockStatement $ Block
+                                                          [ExpressionStatement $ Assign "=" (patternNoExprToExpr valName) init'
+                                                          ,ct body'
+                                                          ]
+                                    }
+      where ct = ForIn (ForInLHSExpr $ patternNoExprToExpr valName) b
     myStat (ForIn a b body) = liftM (ForIn a b) $ loop body
+    myStat (ForEach (ForInVarDef kind valName init) b body)
+        | kind /= LetDefinition = do{ body' <- loop body
+                                    ; lift $ addFunctionVariables (map (\n -> (LHSSimple n,Nothing)) $ patternComponents valName)
+                                    ; return
+                                      $ case init of
+                                          Nothing -> ct body'
+                                          Just init' -> BlockStatement $ Block
+                                                          [ExpressionStatement $ Assign "=" (patternNoExprToExpr valName) init'
+                                                          ,ct body'
+                                                          ]
+                                    }
+      where ct = ForEach (ForInLHSExpr $ patternNoExprToExpr valName) b
     myStat (ForEach a b body) = liftM (ForEach a b) $ loop body
     myStat stat@(Switch _ _) = do{ isInsideSwitch <- gets ssIsInsideSwitch
                                  ; modify (\s -> s { ssIsInsideSwitch = True })
@@ -656,6 +702,17 @@ splitStatementsIntoFunction params args getStatements
                                      ; modify (\s -> s { ssSeenLabels = labels })
                                      ; return (Labelled label stat')
                                      }
+    myStat (VarDef kind vars) | kind /= LetDefinition = do{ --prevDeclaredVariables <- gets ssDeclaredVariables
+                                                          ; let declaredVariables = concatMap (patternComponents . fst) vars
+                                                          ; lift $ addFunctionVariables (map (\n -> (LHSSimple n,Nothing)) declaredVariables)
+                                                          ; --modify (\s -> s { ssDeclaredVariables = declaredVariables `union` prevDeclaredVariables })
+                                                          ; let init = mapMaybe (\(pat,val) -> case val of
+                                                                                                 Just x -> Just (Assign "=" (patternNoExprToExpr pat) x)
+                                                                                                 Nothing -> Nothing) vars
+                                                          ; return $ if null init
+                                                                     then EmptyStat
+                                                                     else ExpressionStatement $ foldl1 (Binary ",") init
+                                                          }
     myStat s = transformStat defaultTransformer s
 
 letVariables :: CodeFragment a => (LHSPatternExpr -> Expr -> TransformerState Expr) -> [(LHSPatternNoExpr,Maybe Expr)] -> a -> (Expr -> a -> TransformerState b) -> ([LHSPatternNoExpr] -> [Expr] -> TransformerState b) -> TransformerState b
@@ -665,16 +722,16 @@ letVariables tAssign vars x transComma transFunction
         ; if null $ intersect usedVariables definedVariables
           then
             do{ let tVar (LHSSimple name,Nothing)
-                        = do{ name2 <- newInternalVariable
+                        = do{ name2 <- newTemporaryVariable
                             ; return ([(name,name2)],Nothing,Just name2)
                             }
                     tVar (LHSSimple name,Just init)
-                        = do{ name2 <- newInternalVariable
+                        = do{ name2 <- newTemporaryVariable
                             ; return ([(name,name2)],Just (LHSSimple $ Variable name2,init),Nothing)
                             }
                     tVar (pat,Just init)
                         = do{ let names = patternComponents pat
-                            ; names2 <- mapM (const newInternalVariable) names
+                            ; names2 <- mapM (const newTemporaryVariable) names
                             ; let namesSubst = zip names names2
                             ; let pat' = substVariablesInPattern namesSubst pat
                             ; return (namesSubst,Just (patternNoExprToExpr pat',init),Nothing)
