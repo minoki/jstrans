@@ -5,7 +5,7 @@ import Text.ParserCombinators.Parsec.Expr (Assoc)
 import Monad
 import Control.Monad.State
 import List
-import Maybe (maybeToList,catMaybes)
+import Maybe (maybeToList,catMaybes,isNothing)
 
 type Operator = String
 operatorForName :: String -> Operator
@@ -532,7 +532,70 @@ scanJumps code = sjResult $ flip execState (ScanJumpData (ScanJumpResult False F
                                            $ modifyR (\r -> r { sjExternalLabels = label : sjExternalLabels r })
                                        }
     myStat (Return Nothing) = modifyR (\r -> r { sjHasReturn = True })
-    myStat (Return (Just _)) = modifyR (\r -> r { sjHasReturn = True , sjHasValuedReturn = True })
+    myStat (Return (Just _)) = modifyR (\r -> r { sjHasValuedReturn = True })
+    myStat (Labelled label stat) = do{ labels <- gets sjSeenLabels
+                                     ; modify (\s -> s { sjSeenLabels = label:labels })
+                                     ; visitStat defaultVisitor stat
+                                     ; modify (\s -> s { sjSeenLabels = labels })
+                                     }
+    myStat stat = visitStat defaultVisitor stat
+
+hasUnconditionalJump :: CodeFragment a => a -> Bool
+hasUnconditionalJump code = isNothing $ flip execStateT (ScanJumpData (ScanJumpResult False False False False []) [] False False) $ applyVisitor myVisitor code
+  where
+    myVisitor,defaultVisitor :: Visitor (StateT ScanJumpData Maybe)
+    myVisitor = defaultVisitor { visitExpr = const $ lift $ Just ()
+                               , visitStat = myStat
+                               , visitFunction = const $ lift $ Just ()
+                               }
+    defaultVisitor = getDefaultVisitor myVisitor
+    loop body = do{ isInsideLoop <- gets sjIsInsideLoop
+                  ; modify (\s -> s { sjIsInsideLoop = True })
+                  ; myStat body
+                  ; modify (\s -> s { sjIsInsideLoop = isInsideLoop })
+                  }
+    modifyR f = modify (\s@ScanJumpData { sjResult = r } -> s { sjResult = f r })
+    myStat (If _ t (Just e)) | hasUnconditionalJump t && hasUnconditionalJump e = lift Nothing
+    myStat (If _ _ _) = lift $ Just ()
+    myStat (While _ body) = lift $ Just ()
+    myStat (DoWhile _ body) = loop body
+    myStat (For _ Nothing _ body) = loop body
+    myStat (For _ _ _ body) = lift $ Just ()
+    myStat (ForIn _ _ body) = lift $ Just ()
+    myStat (ForEach _ _ body) = lift $ Just ()
+    myStat (Try b conditionalCatches unconditionalCatch _)
+        | hasUnconditionalJump b
+          && and (map (\(_,_,b) -> hasUnconditionalJump b) conditionalCatches)
+          && maybe True (hasUnconditionalJump . snd) unconditionalCatch
+              = lift Nothing
+    myStat (Try _ _ _ _) = lift $ Just ()
+    myStat stat@(Switch _ _) = do{ isInsideSwitch <- gets sjIsInsideSwitch
+                                 ; modify (\s -> s { sjIsInsideSwitch = True })
+                                 ; visitStat defaultVisitor stat
+                                 ; modify (\s -> s { sjIsInsideSwitch = isInsideSwitch })
+                                 }
+    myStat (Break Nothing) = do{ isInsideLoopOrSwitch <- gets sjIsInsideLoopOrSwitch
+                               ; if isInsideLoopOrSwitch
+                                 then lift $ Just ()
+                                 else lift Nothing
+                               }
+    myStat (Break (Just label)) = do{ seenLabels <- gets sjSeenLabels
+                                    ; if label `elem` seenLabels
+                                      then lift $ Just ()
+                                      else lift Nothing
+                                    }
+    myStat (Continue Nothing) = do{ isInsideLoop <- gets sjIsInsideLoop
+                                  ; if isInsideLoop
+                                    then lift $ Just ()
+                                    else lift Nothing
+                                  }
+    myStat (Continue (Just label)) = do{ seenLabels <- gets sjSeenLabels
+                                       ; if label `elem` seenLabels
+                                         then lift $ Just ()
+                                         else lift Nothing
+                                       }
+    myStat (Return Nothing) = lift Nothing
+    myStat (Return (Just _)) = lift Nothing
     myStat (Labelled label stat) = do{ labels <- gets sjSeenLabels
                                      ; modify (\s -> s { sjSeenLabels = label:labels })
                                      ; visitStat defaultVisitor stat

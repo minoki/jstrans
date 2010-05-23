@@ -536,20 +536,14 @@ splitIntoFunction params args getStatements
         ; return $ FuncCall (FunctionExpression False fn') args
         }
 
-data JumpKind = JKReturn
-              | JSValuedReturn
-              | JKBreak
-              | JKContinue
-              | JSLabelledBreak String
-              | JSLabelledContinue String
-                deriving (Eq,Show)
 data SplitStatementsData = SplitStatementsData{ ssSeenLabels :: [String]
                                               , ssIsInsideLoop :: Bool
                                               , ssIsInsideSwitch :: Bool
                                               , ssIds :: [(Statement,Int)]
                                               , ssNextId :: Int
-                                              , ssModeVar :: String
-                                              , ssValueVar :: String
+                                              , ssModeVar :: Maybe String
+                                              , ssValueVar :: Maybe String
+                                              , ssHasUnconditionalJump :: Bool
                                               }
                          deriving (Eq,Show)
 ssIsInsideLoopOrSwitch ssdata = ssIsInsideLoop ssdata || ssIsInsideSwitch ssdata
@@ -570,7 +564,10 @@ splitStatementsIntoFunction params args getStatements
               hasValuedReturn = sjHasValuedReturn scanJumpResult
               hasMultiplePath = let boolToInt True = 1
                                     boolToInt False = 0
-                                in True
+                                in 1 < (sum $ map boolToInt $ map ($ scanJumpResult)
+                                                [sjHasReturn,sjHasValuedReturn,sjHasUnlabelledBreak,sjHasUnlabelledContinue])
+                                       + (length $ sjExternalLabels scanJumpResult)
+              hasUnconditionalJumpInStatements = hasUnconditionalJump statements
         ; let makeFuncCall statements
                   = do{ let statements' | null tempVars = statements
                                         | not (null tempVars) = (VarDef VariableDefinition $ map (\n -> (LHSSimple n,Nothing)) tempVars)
@@ -580,23 +577,28 @@ splitStatementsIntoFunction params args getStatements
                       ; fn' <- transformFunctionArguments fn
                       ; return $ FuncCall (FunctionExpression False fn') args
                       }
-        ; modeVar <- if hasMultiplePath then genSym else genSym
-        ; valueVar <- if hasValuedReturn then genSym else genSym --return (error "valueVar referred")
-        ; addTemporaryVariables [modeVar,valueVar]
-        ; (statements',state) <- transformStatements statements modeVar valueVar
+        ; modeVar <- if hasMultiplePath then liftM Just newTemporaryVariable else return Nothing
+        ; valueVar <- if hasValuedReturn then liftM Just newTemporaryVariable else return Nothing
+        ; (statements',state) <- transformStatements statements modeVar valueVar hasUnconditionalJumpInStatements
         ; if not hasAnyJump
           then liftM ExpressionStatement $ makeFuncCall statements'
           else
             do{ let --jumpOuter [] = Throw $ Literal $ StringLiteral "\"YOU SHOULDN'T REACH HERE\""--EmptyStat
                     jumpOuter [(jump,_)] = jump
-                    jumpOuter ((jump,id):xs) = If (Binary "===" (Variable modeVar) (Literal $ integerToNumericLiteral id))
+                    jumpOuter ((jump,id):xs) = If (Binary "===" (Variable $ fromJust modeVar) (Literal $ integerToNumericLiteral id))
                                                jump (Just $ jumpOuter xs)
-              ; call <- makeFuncCall $ statements'++[Return $ Just $ Literal $ BooleanLiteral False]
-              ; return $ If call (jumpOuter $ ssIds state) Nothing
+                    
+              ; call <- makeFuncCall $ if hasUnconditionalJumpInStatements
+                                       then statements'
+                                       else statements'++[Return $ Just $ Literal $ BooleanLiteral False]
+              ; return $ if hasUnconditionalJumpInStatements
+                         then blockStatement [ExpressionStatement call,jumpOuter $ ssIds state]
+                         else If call (jumpOuter $ ssIds state) Nothing
               }
         }
   where
-    transformStatements code modeVar valueVar = runStateT (applyTransformer myTransformer code) (SplitStatementsData [] False False [] 0 modeVar valueVar)
+    transformStatements code modeVar valueVar hasUnconditionalJumpInStatements
+        = runStateT (applyTransformer myTransformer code) (SplitStatementsData [] False False [] 0 modeVar valueVar hasUnconditionalJumpInStatements)
     myTransformer,defaultTransformer :: Transformer (StateT SplitStatementsData TransformerState)
     myTransformer = defaultTransformer { transformExpr = return
                                        , transformStat = myStat
@@ -620,10 +622,14 @@ splitStatementsIntoFunction params args getStatements
                                         }
                        }
     transformJump jump = do{ modeVar <- gets ssModeVar
+                           ; hasUnconditionalJumpInStatements <- gets ssHasUnconditionalJump
+                           ; let ret | hasUnconditionalJumpInStatements = Return Nothing
+                                     | otherwise = Return $ Just $ Literal $ BooleanLiteral True
                            ; id <- getJumpId jump
-                           ; return $ blockStatement [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
-                                                     ,Return $ Just $ Literal $ BooleanLiteral True
-                                                     ]
+                           ; return $ maybe ret (\modeVarName -> blockStatement
+                                                                 [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVarName) $ Literal $ integerToNumericLiteral id
+                                                                 ,ret
+                                                                 ]) modeVar
                            }
     myStat (While a body) = liftM (While a) $ loop body
     myStat (DoWhile a body) = liftM (DoWhile a) $ loop body
@@ -682,13 +688,17 @@ splitStatementsIntoFunction params args getStatements
                                             }
     myStat stat@(Return Nothing) = transformJump stat
     myStat (Return (Just value)) = do{ modeVar <- gets ssModeVar
-                                     ; valueVar <- gets ssValueVar
+                                     ; valueVar <- gets (fromJust . ssValueVar)
+                                     ; hasUnconditionalJumpInStatements <- gets ssHasUnconditionalJump
+                                     ; let ret | hasUnconditionalJumpInStatements = Return Nothing
+                                               | otherwise = Return $ Just $ Literal $ BooleanLiteral True
                                      ; id <- getJumpId (Return $ Just $ Variable valueVar)
-                                     ; return $ blockStatement
-                                                  [ExpressionStatement $ Assign "=" (LHSSimple $ Variable valueVar) $ value
-                                                  ,ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVar) $ Literal $ integerToNumericLiteral id
-                                                  ,Return $ Just $ Literal $ BooleanLiteral True
-                                                  ]
+                                     ; return $ blockStatement $ 
+                                       (ExpressionStatement $ Assign "=" (LHSSimple $ Variable valueVar) $ value)
+                                       : maybe [ret] (\modeVarName -> 
+                                                        [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVarName) $ Literal $ integerToNumericLiteral id
+                                                        ,ret
+                                                        ]) modeVar
                                      }
     myStat (Labelled label stat) = do{ labels <- gets ssSeenLabels
                                      ; modify (\s -> s { ssSeenLabels = label:labels })
