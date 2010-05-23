@@ -21,8 +21,11 @@ data TransformOptions = TransformOptions
   , transformGeneratorExpression :: Bool -- not parsed
   }
 
-identifierToStringLiteral = StringLiteral . show
-integerToNumericLiteral = NumericLiteral . show
+identifierToStringLiteral :: FromLiteral a => String -> a
+identifierToStringLiteral = fromLiteral . StringLiteral . show
+
+toNumericLiteral :: (Num a,FromLiteral b) => a -> b
+toNumericLiteral = fromLiteral . NumericLiteral . show
 
 data FunctionContext
     = FunctionContext
@@ -74,7 +77,7 @@ newTemporaryVariable = do{ name <- genSym
                          }
 
 transformProgram :: TransformOptions -> Program -> Program
-transformProgram options p = evalState (AST.transformProgram transformer p) initialState
+transformProgram options p = expandMultiStatements $ evalState (AST.transformProgram transformer p) initialState
   where
     transformer = getTransformer options
     initialN = 1+scanInternalIdentifierUse p
@@ -167,8 +170,7 @@ getTransformer options = myTransformer
             ; o <- myExpr o
             ; body <- myStat body
             ; a <- tAssign2 pat (Variable keyName)
-            ; let body' = blockStatement [ExpressionStatement a,body]
-            ; return $ ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o body'
+            ; return $ ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o (a `catStats` body)
             }
     tForIn (ForInVarDef kind pat e) o body
         | transformDestructuringAssignment options && not (isTrivialPattern pat)
@@ -178,8 +180,7 @@ getTransformer options = myTransformer
             ; o <- myExpr o
             ; body <- myStat body
             ; a <- tAssign2 (patternNoExprToExpr pat) (Variable keyName)
-            ; let body' = blockStatement [ExpressionStatement a,body]
-            ; let forInStat = ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o body'
+            ; let forInStat = ForIn (ForInLHSExpr (LHSSimple $ Variable keyName)) o (a `catStats` body)
             ; return $ blockStatement [varDef,forInStat]
             }
     tForIn head o body
@@ -198,7 +199,7 @@ getTransformer options = myTransformer
                          [def
                          ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
                                 (Variable objName)
-                                (blockStatement [ExpressionStatement a,body])
+                                (a `catStats` body)
                          ]
             }
     tForEach (ForInVarDef kind valName init) o body
@@ -213,7 +214,7 @@ getTransformer options = myTransformer
                        ,def2
                        ,ForIn (ForInVarDef VariableDefinition (LHSSimple keyName) Nothing)
                               (Variable objName)
-                              (blockStatement [ExpressionStatement a,body])
+                              (a `catStats` body)
                        ]
             }
     tForEach head o body
@@ -254,7 +255,7 @@ getTransformer options = myTransformer
         | transformReservedNameAsIdentifier options
           && name `elem` reservedNames
         = do{ x' <- myExpr x
-            ; return $ Index x' $ Literal $ identifierToStringLiteral name
+            ; return $ Index x' $ identifierToStringLiteral name
             }
     myExpr (ArrayComprehension x f i)
         | transformArrayComprehension options
@@ -297,7 +298,7 @@ getTransformer options = myTransformer
                 }
         myPropName (PNIdentifier name)
             | name `elem` reservedNames
-            = PNLiteral $ identifierToStringLiteral name
+            = identifierToStringLiteral name
         myPropName x = x
     myExpr (FunctionExpression True fn)
         | transformExpressionClosure options
@@ -585,14 +586,14 @@ splitStatementsIntoFunction params args getStatements
           else
             do{ let --jumpOuter [] = Throw $ Literal $ StringLiteral "\"YOU SHOULDN'T REACH HERE\""--EmptyStat
                     jumpOuter [(jump,_)] = jump
-                    jumpOuter ((jump,id):xs) = If (Binary "===" (Variable $ fromJust modeVar) (Literal $ integerToNumericLiteral id))
+                    jumpOuter ((jump,id):xs) = If (Binary "===" (Variable $ fromJust modeVar) (toNumericLiteral id))
                                                jump (Just $ jumpOuter xs)
                     
               ; call <- makeFuncCall $ if hasUnconditionalJumpInStatements
                                        then statements'
                                        else statements'++[Return $ Just $ Literal $ BooleanLiteral False]
               ; return $ if hasUnconditionalJumpInStatements
-                         then blockStatement [ExpressionStatement call,jumpOuter $ ssIds state]
+                         then call `catStats` (jumpOuter $ ssIds state)
                          else If call (jumpOuter $ ssIds state) Nothing
               }
         }
@@ -626,10 +627,8 @@ splitStatementsIntoFunction params args getStatements
                            ; let ret | hasUnconditionalJumpInStatements = Return Nothing
                                      | otherwise = Return $ Just $ Literal $ BooleanLiteral True
                            ; id <- getJumpId jump
-                           ; return $ maybe ret (\modeVarName -> blockStatement
-                                                                 [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVarName) $ Literal $ integerToNumericLiteral id
-                                                                 ,ret
-                                                                 ]) modeVar
+                           ; return $ maybe ret (\modeVarName -> (Assign "=" (LHSSimple $ Variable modeVarName) $ toNumericLiteral id)
+                                                                 `catStats` ret) modeVar
                            }
     myStat (While a body) = liftM (While a) $ loop body
     myStat (DoWhile a body) = liftM (DoWhile a) $ loop body
@@ -641,10 +640,8 @@ splitStatementsIntoFunction params args getStatements
                                     ; return
                                       $ case init of
                                           Nothing -> transformedLoop
-                                          Just init' -> blockStatement
-                                                          [ExpressionStatement $ Assign "=" (patternNoExprToExpr valName) init'
-                                                          ,transformedLoop
-                                                          ]
+                                          Just init' -> Assign "=" (patternNoExprToExpr valName) init'
+                                                        `catStats` transformedLoop
                                     }
     myStat (ForIn a b body) = liftM (ForIn a b) $ loop body
     myStat (ForEach (ForInVarDef kind valName init) b body)
@@ -654,10 +651,8 @@ splitStatementsIntoFunction params args getStatements
                                     ; return
                                       $ case init of
                                           Nothing -> transformedLoop
-                                          Just init' -> blockStatement
-                                                          [ExpressionStatement $ Assign "=" (patternNoExprToExpr valName) init'
-                                                          ,transformedLoop
-                                                          ]
+                                          Just init' -> Assign "=" (patternNoExprToExpr valName) init'
+                                                        `catStats` transformedLoop
                                     }
     myStat (ForEach a b body) = liftM (ForEach a b) $ loop body
     myStat stat@(Switch _ _) = do{ isInsideSwitch <- gets ssIsInsideSwitch
@@ -693,12 +688,10 @@ splitStatementsIntoFunction params args getStatements
                                      ; let ret | hasUnconditionalJumpInStatements = Return Nothing
                                                | otherwise = Return $ Just $ Literal $ BooleanLiteral True
                                      ; id <- getJumpId (Return $ Just $ Variable valueVar)
-                                     ; return $ blockStatement $ 
-                                       (ExpressionStatement $ Assign "=" (LHSSimple $ Variable valueVar) $ value)
-                                       : maybe [ret] (\modeVarName -> 
-                                                        [ExpressionStatement $ Assign "=" (LHSSimple $ Variable modeVarName) $ Literal $ integerToNumericLiteral id
-                                                        ,ret
-                                                        ]) modeVar
+                                     ; return $ Assign "=" (LHSSimple $ Variable valueVar) value
+                                                `catStats` maybe ret (\modeVarName -> 
+                                                                          (Assign "=" (LHSSimple $ Variable modeVarName) $ toNumericLiteral id)
+                                                                          `catStats` ret) modeVar
                                      }
     myStat (Labelled label stat) = do{ labels <- gets ssSeenLabels
                                      ; modify (\s -> s { ssSeenLabels = label:labels })

@@ -4,6 +4,7 @@ import Prelude
 import Text.ParserCombinators.Parsec.Expr (Assoc)
 import Monad
 import Control.Monad.State
+import Control.Monad.Identity
 import List
 import Maybe (maybeToList,catMaybes,isNothing)
 
@@ -62,6 +63,7 @@ data Statement = EmptyStat
                | ExpressionStatement Expr
                | Return (Maybe Expr)
                | Throw Expr
+               | MultiStatements [Statement]
                | BlockStatement Block
                | If Expr Statement (Maybe Statement)
                | While Expr Statement
@@ -171,6 +173,38 @@ instance StringToList a => PatternFromIdentifier [a] where -- String
 instance PatternFromIdentifier Expr where
   patternFromIdentifier = Variable
 
+class FromLiteral a where
+  fromLiteral :: Literal -> a
+
+instance FromLiteral Literal where
+  fromLiteral = id
+
+instance FromLiteral PropertyName where
+  fromLiteral = PNLiteral
+
+instance FromLiteral Expr where
+  fromLiteral = Literal
+
+class StatementLike a where
+  toStatement :: a -> Statement
+  toStatements :: a -> [Statement]
+  toStatements x = [toStatement x]
+
+instance StatementLike Statement where
+  toStatement = id
+  toStatements EmptyStat = []
+  toStatements (MultiStatements ss) = ss
+  toStatements x = [x]
+
+instance StatementLike Expr where
+  toStatement = ExpressionStatement
+
+catStats :: (StatementLike a,StatementLike b) => a -> b -> Statement
+catStats x y = case toStatements x ++ toStatements y of
+                 [] -> EmptyStat
+                 [s] -> s
+                 ss -> MultiStatements ss
+
 blockStatement = BlockStatement . Block
 
 makeFunction name args body = fn
@@ -259,6 +293,7 @@ getDefaultTransformer v
     myStat (ExpressionStatement e) = liftM ExpressionStatement (expr e)
     myStat (Return x) = liftM Return (mmap expr x)
     myStat (Throw x) = liftM Throw (expr x)
+    myStat (MultiStatements ss) = liftM MultiStatements (mapM stat ss)
     myStat (BlockStatement b) = liftM BlockStatement (block b)
     myStat (If c t e) = liftM3 If (expr c) (stat t) (mmap stat e)
     myStat (While c b) = liftM2 While (expr c) (stat b)
@@ -364,6 +399,7 @@ getDefaultVisitor v
     myStat (ExpressionStatement e) = expr e
     myStat (Return x) = mmap_ expr x
     myStat (Throw x) = expr x
+    myStat (MultiStatements ss) = mapM_ stat ss
     myStat (BlockStatement b) = block b
     myStat (If c t e) = expr c >> stat t >> mmap_ stat e
     myStat (While c b) = expr c >> stat b
@@ -624,3 +660,26 @@ isSingleElementPattern (LHSObject elems) = (length $ filter (not . isEmptyPatter
 isTrivialPattern (LHSSimple _) = True
 isTrivialPattern _ = False
 
+
+expandMultiStatements :: CodeFragment a => a -> a
+expandMultiStatements code = runIdentity (applyTransformer myTransformer code)
+  where
+    myTransformer,defaultTransformer :: Transformer Identity
+    myTransformer = defaultTransformer { transformStat = myStat
+                                       , transformBlock = myBlock
+                                       , transformFunction = myFunction
+                                       , transformProgram = myProgram
+                                       }
+    defaultTransformer = getDefaultTransformer myTransformer
+    myStat (MultiStatements ss) = defaultStat =<< (liftM BlockStatement $ myBlock $ Block ss)
+    myStat s = defaultStat s
+    defaultStat = transformStat defaultTransformer
+    myBlock (Block ss) = transformBlock defaultTransformer $ Block $ flatten ss
+    myFunction f = transformFunction defaultTransformer $ makeFunction (functionName f) (functionArguments f) $ let FunctionBody body = functionBody f in FunctionBody $ flattenSE body
+    myProgram (Program ss) = transformProgram defaultTransformer $ Program $ flattenSE ss
+    flatten ss = concatMap expand ss
+    expand (MultiStatements ss) = flatten ss
+    expand s = [s]
+    flattenSE ss = concatMap expandSE ss
+    expandSE (Statement (MultiStatements ss)) = map Statement $ flatten ss
+    expandSE s = [s]
